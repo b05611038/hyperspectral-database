@@ -4,9 +4,15 @@ import json
 import copy
 
 import numpy as np
-from pymongo import MongoClient, InsertOne, DeleteOne
+
+import gridfs
+from pymongo import (MongoClient,
+                     UpdateOne,
+                     InsertOne, 
+                     DeleteOne)
 
 from . import __version__
+from .utils import serialize, deserialize 
 from .template import Template
 
 
@@ -211,9 +217,16 @@ class HyperspectralDatabase(Database):
                  port = port)
 
         self._collection_list = ['data']
-        self.collections = {}
-        for collection in self._collection_list:
-            self.collections[collection] = self.database[collection]
+        self.fs, self.collections = self._init_gridfs_collections(self.database, 
+                                                                  self._collection_list)
+
+    def _init_gridfs_collections(self, database, name_list):
+        fs = gridfs.GridFS(database)
+        collections = {}
+        for name in name_list:
+            collections[name] = database[name]
+        
+        return fs, collections
 
     def __repr__(self):
         lines = 'HyperspectralDatabase version: {0}\n'.format(__version__)
@@ -301,7 +314,9 @@ class HyperspectralDatabase(Database):
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
-        single_document = self._single_data_document(file, data_args, collection)
+        single_document = self._single_data_document(file, data_args, collection, 
+                certain = certain)
+
         if certain:
             requests = [InsertOne(single_document)]
             if len(requests) > 0:
@@ -363,7 +378,9 @@ class HyperspectralDatabase(Database):
             running_index, inner_batch_index = 0, 0
             for f in json_files:
                 single_document = self._single_data_document(f, data_args, collection,
-                        insert_index = insert_index)
+                        insert_index = insert_index,
+                        certain = certain)
+
                 requests.append(InsertOne(single_document))
                 insert_index += 1
                 inner_batch_index += 1
@@ -408,7 +425,9 @@ class HyperspectralDatabase(Database):
 
         return insert_index
 
-    def _single_data_document(self, json_file_path, data_args, collection, insert_index = None):
+    def _single_data_document(self, json_file_path, data_args, collection, 
+            insert_index = None, certain = False):
+
         single_data_document, content = Template(collection), {}
         with open(json_file_path, 'r') as f:
             contents = json.loads(f.read())
@@ -420,6 +439,11 @@ class HyperspectralDatabase(Database):
         for args in data_args:
             args_value = contents.get(args, None)
             if args_value is not None:
+                if args == 'spectral':
+                    if certain:
+                        args_value = serialize(args_value)
+                        args_value = self.fs.put(args_value)
+
                 single_data_document[args] = args_value
 
         if insert_index is None:
@@ -428,6 +452,12 @@ class HyperspectralDatabase(Database):
         single_data_document['insert_index'] = insert_index
 
         return single_data_document
+
+    def _delete_gridfs_object(self, object_pointer):
+        if object_pointer != 'unknown':
+            self.fs.delete(object_pointer)
+
+        return None 
 
     def delete_data(self, indices, collection = 'data', certain = False):
         if not isinstance(indices, (int, list, tuple)):
@@ -446,12 +476,19 @@ class HyperspectralDatabase(Database):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            requests = []
+            requests, need_to_delete_pointers = [], []
             for index in indices:
+                docs = self.find({'insert_index': index})
+                for doc in docs:
+                    object_pointer = doc.get('spectral', 'unknown')
+
+                need_to_delete_pointers.append(object_pointer)
                 requests.append(DeleteOne({'insert_index': index}))
 
             if len(requests) > 0:
                 self.collections[collection].bulk_write(requests)
+                for pointer in need_to_delete_pointers:
+                    self._delete_gridfs_object(pointer)
 
             print('Successfully delete data with indices:{0}'.format(indices))
         else:
@@ -470,15 +507,19 @@ class HyperspectralDatabase(Database):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            requests = []
+            requests, need_to_delete_pointers = [], []
             documents = self.find({}, collection = collection)
             for doc in documents:
                 object_id = doc.get('_id', None)
+                data_pointer = doc.get('spectral', 'unknown')
                 if object_id is not None:
                     requests.append(DeleteOne({'_id': object_id}))
+                    need_to_delete_pointers.append(data_pointer)
 
             if len(requests) > 1:
                 self.collections[collection].bulk_write(requests)
+                for pointer in need_to_delete_pointers:
+                    self._delete_gridfs_object(pointer)
 
             print('Successfully clear all data in {0}'.format(self.__class__.__name__))
         else:
@@ -519,7 +560,8 @@ class HyperspectralDatabase(Database):
                 for args in data_args:
                     args_value = doc.get(args, 'unknown')
                     if args == 'spectral':
-                        args_value = np.array(args_value)
+                        args_value = self.fs.get(args_value).read()
+                        args_value = deserialize(args_value)
 
                     single_data[args] = args_value
 

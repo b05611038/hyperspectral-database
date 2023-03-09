@@ -3,11 +3,10 @@ import argparse
 
 from hyperspectral_database import HyperspectralDatabase
 
-def test_API(io_testing = False, delete_testing = False, data_path = None):
+def test_API(db, io_testing = False, delete_testing = False, data_path = None):
     if data_path is None:
        raise RuntimeError('Argument: data_path not set.')
 
-    db = HyperspectralDatabase()
     db.help()
     cursor = db.find({'insert_index': 0})
     cursor = db.find_one({})
@@ -57,6 +56,16 @@ def main():
 
     parser.add_argument('--data_path', type = str, default = './test_data',
             help = 'The path that store many file.')
+    parser.add_argument('--db_name', type = str, default = 'hyperspectral',
+            help = 'The database name of the deployed MongoDB.')
+    parser.add_argument('--user_id', type = str, default = '',
+            help = 'The user name of the deployed MongoDB.')
+    parser.add_argument('--passwd', type = str, default = '',
+            help = 'The password of the deployed MongoDB.')
+    parser.add_argument('--host', type = str, default = '192.168.50.146',
+            help = 'The host of the deployed MongoDB.')
+    parser.add_argument('--port', type = int, default = 27087,
+            help = 'The port of the deployed MongoDB.')
     parser.add_argument('--io_testing', action = 'store_true',
             help = 'Test the IO API of the database object.' + \
             ' Please do not run if you are not developer.')
@@ -65,11 +74,19 @@ def main():
             ' Please do not run if you are not developer.')
 
     args = parser.parse_args()
-    test_API(io_testing = args.io_testing,
-             delete_testing = args.delete_testing,
-             data_path = args.data_path)
+
+    db = HyperspectralDatabase(db_name = args.db_name,
+                               user_id = args.user_id,
+                               passwd = args.passwd,
+                               host = args.host,
+                               port = args.port)
+
+    test_API(db, io_testing = args.io_testing,
+                 delete_testing = args.delete_testing,
+                 data_path = args.data_path)
 
     print('Program successfully finish.')
+
     return None
 
 if __name__ == '__main__':

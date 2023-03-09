@@ -32,6 +32,7 @@ def main():
             help = 'To verify insert process.')
 
     args = parser.parse_args()
+
     db = HyperspectralDatabase(db_name = args.db_name,
                                user_id = args.user_id,
                                passwd = args.passwd,

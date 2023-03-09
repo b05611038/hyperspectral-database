@@ -8,7 +8,7 @@ DataDocument = {
         'source_filename': 'unknown',
         'datatype': 'unknown',
         'species': 'unknown',
-        'spectral': [],
+        'spectral': 'unknown',
 }
 
 def Template(collection = 'data'):
