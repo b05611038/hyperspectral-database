@@ -291,6 +291,13 @@ class HyperspectralDatabase(Database):
         if collection.lower() not in self._collection_list:
             raise ValueError(collection, ' is not a valid collection selection.')
 
+        if not isinstance(data_args, (list, tuple)):
+            raise TypeError('Argument: data_args must be a Python list/tuple object.')
+
+        for e in data_args:
+            if not isinstance(e, str):
+                raise TypeError('Element in argument::data_args must be a Python string object.')
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
@@ -308,8 +315,8 @@ class HyperspectralDatabase(Database):
         return None
 
     def batch_insert_data(self, directory, file_extension = '.json', collection = 'data', 
-            data_args = ('datatype', 'species', 'spectral'), certain = False, 
-            one_by_one_insert = True, progress = True):
+            data_args = ('datatype', 'species', 'spectral'), batch_size = 10000, 
+            certain = False, progress = True):
 
         if not isinstance(directory, str):
             raise TypeError('Argument: directory must be a Python string object')
@@ -326,11 +333,21 @@ class HyperspectralDatabase(Database):
         if collection.lower() not in self._collection_list:
             raise ValueError(collection, ' is not a valid collection selection.')
 
+        if not isinstance(data_args, (list, tuple)):
+            raise TypeError('Argument: data_args must be a Python list/tuple object.')
+
+        for e in data_args:
+            if not isinstance(e, str):
+                raise TypeError('Element in argument::data_args must be a Python string object.')
+
+        if not isinstance(batch_size, int):
+            raise TypeError('Argument: batch_size must be a Python int object.')
+
+        if batch_size < 0:
+            raise ValueError('Argument: batch_size must larger than zero.')
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
-
-        if not isinstance(one_by_one_insert, bool):
-            raise TypeError('Argument: one_by_one_insert must be a Python boolean object.')
 
         if not isinstance(progress, bool):
              raise TypeError('Argument: progress must be a Python boolean object.')
@@ -341,37 +358,36 @@ class HyperspectralDatabase(Database):
                 json_files.append(os.path.join(directory, f))
 
         file_numbers = len(json_files)
-        if one_by_one_insert:
-            running_index = 0
+        if certain:
+            requests, insert_index = [], self._get_insert_index()
+            running_index, inner_batch_index = 0, 0
             for f in json_files:
-                self.insert_data(f, file_extension = file_extension,
-                                    collection = collection,
-                                    data_args = data_args,
-                                    certain = certain)
+                single_document = self._single_data_document(f, data_args, collection,
+                        insert_index = insert_index)
+                requests.append(InsertOne(single_document))
+                insert_index += 1
+                inner_batch_index += 1
 
-                running_index += 1
                 if progress:
-                    print('Batch insert progress: {0} / {1}'.format(running_index,
+                    running_index += 1
+                    print('Acquring data progress: {0} / {1}'.format(running_index,
                                                                     file_numbers))
 
+                if inner_batch_index == batch_size:
+                    if len(requests) > 0:
+                        self.collections[collection].bulk_write(requests)
+                        print('Sucessfully insert {0} files into {1}'\
+                                .format(len(requests), self.__class__.__name__))
+
+                        requests = []
+
+                    inner_batch_index = 0
+                    print('Successfully reset file buffer.')
+
+            if len(requests) > 0:
+                self.collections[collection].bulk_write(requests)
         else:
-            if certain:
-                requests, running_index, insert_index = [], 0, self._get_insert_index()
-                for f in json_files:
-                    single_document = self._single_data_document(f, data_args, collection,
-                            insert_index = insert_index)
-                    requests.append(InsertOne(single_document))
-                    insert_index += 1
-
-                    if progress:
-                        running_index += 1
-                        print('Acquring data progress: {0} / {1}'.format(running_index,
-                                                                        file_numbers))
-
-                if len(requests) > 0:
-                    self.collections[collection].bulk_write(requests)
-            else:
-                print('Not certain mode, no insertion in the database.')
+            print('Not certain mode, no insertion in the database.')
 
         return None
 
@@ -397,6 +413,9 @@ class HyperspectralDatabase(Database):
         with open(json_file_path, 'r') as f:
             contents = json.loads(f.read())
             f.close()
+
+        source_filename = os.path.split(json_file_path)[-1]
+        single_data_document['source_filename'] = source_filename
 
         for args in data_args:
             args_value = contents.get(args, None)
@@ -485,6 +504,13 @@ class HyperspectralDatabase(Database):
         if collection not in self._collection_list:
             raise ValueError(collection, ' is not a valid collection selection.')
 
+        if not isinstance(data_args, (list, tuple)):
+            raise TypeError('Argument: data_args must be a Python list/tuple object.')
+
+        for e in data_args:
+            if not isinstance(e, str):
+                raise TypeError('Element in argument::data_args must be a Python string object.')
+
         data, counting = [], 0
         for query in queries:
             tmp_cursor = self.find(query, collection = collection)
@@ -504,6 +530,12 @@ class HyperspectralDatabase(Database):
                 self.__class__.__name__))
 
         return data
+
+    def get_all_data(self, collection = 'data', 
+            data_args = ('datatype', 'species', 'spectral')):
+
+        return self.get_data({}, collection = collection,
+                                 data_args = data_args)
 
     def get_data_by_indices(self, indices, collection = 'data',
                 data_args = ('datatype', 'species', 'spectral')):

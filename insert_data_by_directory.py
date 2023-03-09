@@ -3,8 +3,10 @@ import argparse
 
 from hyperspectral_database import HyperspectralDatabase
 
-def insert_data_by_directory(db, directory):
-    db.batch_insert_data(directory, one_by_one_insert = True, progress = True, certain = True)
+def insert_data_by_directory(db, directory, batch_size = 10000, certain = False):
+    db.batch_insert_data(directory, batch_size = batch_size, 
+            progress = True, certain = certain)
+
     print('\nInsertion finish.')
     return None
 
@@ -24,6 +26,10 @@ def main():
             help = 'The host of the deployed MongoDB.')
     parser.add_argument('--port', type = int, default = 27087,
             help = 'The port of the deployed MongoDB.')
+    parser.add_argument('--batch_size', type = int, default = 10000,
+            help = 'The buffer size to insert the data file')
+    parser.add_argument('--certain', action = 'store_true',
+            help = 'To verify insert process.')
 
     args = parser.parse_args()
     db = HyperspectralDatabase(db_name = args.db_name,
@@ -32,7 +38,10 @@ def main():
                                host = args.host,
                                port = args.port)
 
-    insert_data_by_directory(db, args.directory)
+    insert_data_by_directory(db, args.directory, 
+            batch_size = args.batch_size,
+            certain = args.certain)
+
     print('Program finish.')
 
     return None

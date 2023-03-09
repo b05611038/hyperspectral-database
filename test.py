@@ -19,6 +19,7 @@ def test_API(io_testing = False, delete_testing = False, data_path = None):
         data = db.get_data_by_index_range(0, 1, 1)
         data = db.get_data_by_datatypes(['y-injured-like'])
         data = db.get_data_by_species(['tea12'])
+        data = db.get_all_data()
         print('Data acquring API testing finish.')
     else:
         print('Because no data in database, not testing API of acquring data.')
@@ -36,10 +37,8 @@ def test_API(io_testing = False, delete_testing = False, data_path = None):
         else:
             db.insert_data(test_file)
             db.insert_data(test_file, certain = True)
-            db.batch_insert_data(data_path, one_by_one_insert = True)
-            db.batch_insert_data(data_path, one_by_one_insert = True, certain = True)
-            db.batch_insert_data(data_path, one_by_one_insert = False)
-            db.batch_insert_data(data_path, one_by_one_insert = False, certain = True)
+            db.batch_insert_data(data_path, batch_size = 2)
+            db.batch_insert_data(data_path, batch_size = 2, certain = True)
 
         print('IO testing finish.')
 

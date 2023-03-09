@@ -24,3 +24,5 @@ def Template(collection = 'data'):
         raise ValueError('{0} is not a valid selection for Template.')
 
     return document
+
+
