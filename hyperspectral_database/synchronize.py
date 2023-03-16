@@ -3,6 +3,7 @@ import time
 import platform
 
 import multiprocessing as mp
+from multiprocessing import Lock, Process
 
 from .base import Database
 from .client import LightWeightedDatabaseClient
@@ -11,32 +12,38 @@ from .client import LightWeightedDatabaseClient
 __all__ = ['SynchronizedFunctionWapper']
 
 
-def run_worker(rank, lock, func, args, 
-        inputs_container, outputs_container, shared_container):
+def run_worker(rank, 
+        lock, 
+        inputs_container, 
+        shared_arguments,
+        queue_outputs,
+        queue_task_generator,
+        func, args, worker_timeout = -1.):
 
-    database = shared_container.get('database', None)
+    database = shared_arguments.get('database', None)
+    sync_database = LightWeightedDatabaseClient(**database)
     if database is None:
         raise RuntimeError('Cannot acquire attribute from HyperspectralDatabase.')
 
-    sync_database = LightWeightedDatabaseClient(**database)
-    order_generator = shared_container.get('order_generator', None)
-    if order_generator is None:
-        raise RuntimeError('Cannot detect order_generator object.')
-
     while True:
-        order_finish = False
+        order_finish, kwargs = False, {}
+        lock_time = time.time()
         lock.acquire()
+        if queue_task_generator.empty():
+            raise RuntimeError('Cannot detect order_generator object.')
+
+        order_generator = queue_task_generator.get()
         if not order_generator.finish:
             order_index = order_generator.next()
         else:
             order_finish = True
 
+        queue_task_generator.put(order_generator)
         lock.release()
+
         if order_finish:
             break
         else:
-            print('rank: {0} | order_index: {1}'.format(rank, order_index))
-            kwargs = {}
             kwargs['database'] = sync_database
             for argument in args:
                 partition_mode = True
@@ -55,14 +62,56 @@ def run_worker(rank, lock, func, args,
                 kwargs[argument] = contents
 
             outputs = func(**kwargs)
-            outputs_container[order_index] = outputs
+            outputs = _DocumentList(outputs)
+            queue_outputs.put(outputs)
 
     return None
 
+
+class _DocumentList:
+    def __init__(self, docs):
+        self.docs = docs
+
+    @property
+    def docs(self):
+        return self.__docs
+
+    @docs.setter
+    def docs(self, docs):
+        self.__docs = []
+        for doc in docs:
+            if not isinstance(doc, dict):
+                raise TypeError('Get invalid type for document list.')
+
+            self.__docs.append(doc)
+
+        return None
+
+    def append(self, obj):
+        self.__docs.append(obj)
+        return None
+
+    def __len__(self):
+        return len(self.__docs)
+
+    def __getitem__(self, idx):
+        return self.__docs[idx]
+
+
 class _ExecuteGenerator:
-    def __init__(self, order_length):
+    def __init__(self, order_length, debug = False):
         self.order_length = order_length
+        self.debug = debug
         self.finish = False
+
+    def __repr__(self):
+        if self.debug:
+            text = self.__class__.__name__ + '(finish={0}, running_index={1})'\
+                    .format(self.finish, self.__running_index)
+        else:
+            text = self.__class__.__name__ + '(finish={0})'.format(self.finish)
+
+        return text
 
     @property
     def order_length(self):
@@ -80,6 +129,18 @@ class _ExecuteGenerator:
         return None
 
     @property
+    def debug(self):
+        return self._debug
+
+    @debug.setter
+    def debug(self, debug):
+        if not isinstance(debug, bool):
+            raise TypeError('Argument: debug must be a Python boolean object.')
+
+        self._debug = debug
+        return None
+
+    @property
     def finish(self):
         return self.__finish
 
@@ -94,9 +155,6 @@ class _ExecuteGenerator:
         self.__finish = finish
         self.__running_index = 0
         return None
-
-    def __repr__(self):
-        return self.__class__.__name__ + '(order_length={0})'.format(self.order_length)
 
     def next(self):
         index_now = copy.deepcopy(self.__running_index)
@@ -198,12 +256,13 @@ class SynchronizedFunctionWapper:
                 self.mp_start_method = 'fork'
             else:
                 self.mp_start_method = None
-                print('Not support multiprocessing, the requests will run in single process.')
+                print('Not support multiprocessing, the get_data functions will' + \
+                        ' run in single process.')
         else:
              self.mp_start_method = None
 
-        mp.set_start_method(self.mp_start_method)
-        self.reset()
+        if self.mp_start_method is not None:
+            mp.set_start_method(self.mp_start_method, force = True)
 
     @property
     def num_worker(self):
@@ -275,50 +334,23 @@ class SynchronizedFunctionWapper:
         return self.__class__.__name__ + '(query_size={0}, num_worker={1}, timeout={2} seconds)'\
                 .format(self.query_size, self.num_worker, timeout)
 
-    def all_reduce(self, complete_warning = False):
-        outputs = None
-        ordered_task_indices = list(self.outputs_container.keys())
-        ordered_task_indices.sort()
-
-        outputs = []
-        print('ordered_task_indices: ', ordered_task_indices)
-        for index in ordered_task_indices:
-            outputs.append(self.outputs_container[index])
-            del self.outputs_container[index]
-
-        outputs = tuple(zip(*outputs))
-        if complete_warning:
-            warning.warn('The returned object might not complete, please check it carefully.')
-
-        self.reset()
+    def merge_process_outputs(self, outputs, queue_outputs):
+        if not queue_outputs.empty():
+            docs = queue_outputs.get()
+            for doc in docs:
+                outputs.append(doc)
 
         return outputs
 
-    def reset(self):
-        if self.mp_start_method is not None:
-            self.manager = mp.Manager()
-            self.inputs_container = self.manager.dict()
-            self.outputs_container = self.manager.dict()
-            self.shared_arguments = self.manager.dict()
-            self.running_processes = []
-        else:
-            self.manager = None
-            self.inputs_container = None
-            self.outputs_container = None
-            self.shared_arguments = None
-            self.running_processes = []
-
-        return None
-
-    def terminate_process(self):
-        for p in self.running_processes:
+    def terminate_process(self, running_processes):
+        for p in running_processes:
             p.terminate()
             p.close()
 
-        self.running_processes = []
+        running_processes = []
         return None
 
-    def _check_subprocess_finish(self, running_processes):
+    def check_subprocess_finish(self, running_processes):
         is_finish = True
         for p in running_processes:
             if p.is_alive():
@@ -340,65 +372,77 @@ class SynchronizedFunctionWapper:
             timeout = float(timeout)
 
         if self.available:
-            if sync_args is not None:
-                for args in sync_args:
-                    self.inputs_container = self.allocator(kwargs.get(args, None), 
-                            args_name = args,
-                            args_container = self.inputs_container)
+            with mp.Manager() as manager:
+                inputs_container = manager.dict()
+                shared_arguments = manager.dict()
+                if sync_args is not None:
+                    for args in sync_args:
+                        inputs_container = self.allocator(kwargs.get(args, None), 
+                                args_name = args,
+                                args_container = inputs_container)
 
-            for argument in kwargs:
-                if argument in self.forbidden_keywords:
-                    raise RuntimeError('Argument cannot be named as {0}.'.format(argument))
+                for argument in kwargs:
+                    if argument in self.forbidden_keywords:
+                        raise RuntimeError('Argument cannot be named as {0}.'.format(argument))
 
-                if argument not in sync_args:
-                    self.shared_arguments[argument] = kwargs[argument]
+                    if argument not in sync_args:
+                        shared_arguments[argument] = kwargs[argument]
 
-            recorded_partition_number = 1
-            for args in self.inputs_container:
-                partition_number_of_args = len(self.inputs_container[args])
-                if partition_number_of_args != 1:
-                    if recorded_partition_number == 1:
-                        recorded_partition_number = partition_number_of_args
-                    else:
-                        if partition_number_of_args != recorded_partition_number:
-                            raise RuntimeError('Cannot split argument: {0} correctly'\
-                                    .format(args))
+                recorded_partition_number = 1
+                for args in inputs_container:
+                    partition_number_of_args = len(inputs_container[args])
+                    if partition_number_of_args != 1:
+                        if recorded_partition_number == 1:
+                            recorded_partition_number = partition_number_of_args
+                        else:
+                            if partition_number_of_args != recorded_partition_number:
+                                raise RuntimeError('Cannot split argument: {0} correctly'\
+                                        .format(args))
 
-            if recorded_partition_number > 1:
-                order_generator = _ExecuteGenerator(recorded_partition_number)
-                self.shared_arguments['order_generator'] = order_generator
-                self.shared_arguments['database'] = self.database.lightweighted_arguments()
-                process_lock = mp.Lock()
-                complete_warning, start_time = False, time.time()
-                for rank in range(self.num_worker):
-                    p = mp.Process(target = run_worker,
-                        args = (rank,
-                                process_lock,
-                                func,
-                                list(kwargs.keys()),
-                                self.inputs_container,
-                                self.outputs_container,
-                                self.shared_arguments))
+                if recorded_partition_number > 1:
+                    order_generator = _ExecuteGenerator(recorded_partition_number)
+                    shared_arguments['database'] = self.database.lightweighted_arguments()
 
-                    p.start()
-                    self.running_processes.append(p)
+                    queue_outputs = manager.Queue()
+                    queue_task_generator = manager.Queue()
+                    queue_task_generator.put(order_generator)
 
-                finish = False
-                while (not finish):
-                    if self._check_subprocess_finish(self.running_processes):
-                        finish = True
+                    outputs = []
+                    running_processes, process_lock = [], Lock()
+                    complete_warning, start_time = False, time.time()
+                    for rank in range(self.num_worker):
+                        func_args = list(kwargs.keys())
+                        p = Process(target = run_worker,
+                                args = (rank,
+                                        process_lock,
+                                        inputs_container,
+                                        shared_arguments,
+                                        queue_outputs,
+                                        queue_task_generator,
+                                        func,
+                                        func_args))
 
-                    time.sleep(self.process_check_interval)
-                    if timeout is not None:
-                        if (time.time() - start_time) > timeout:
-                            print('Reach timeout limit, force stop function wrapper.')
-                            complete_warning = True
-                            self.terminate_process()
+                        p.start()
+                        running_processes.append(p)
+
+                    finish = False
+                    while (not finish):
+                        outputs = self.merge_process_outputs(outputs, queue_outputs)
+                        if self.check_subprocess_finish(running_processes):
                             finish = True
 
-                outputs = self.all_reduce(complete_warning)
-            else:
-                outputs = func(self.database, **kwargs)
+                        time.sleep(self.process_check_interval)
+                        if timeout is not None:
+                            if (time.time() - start_time) > timeout:
+                                print('Reach timeout limit, force stop function wrapper.')
+                                complete_warning = True
+                                self.terminate_process(running_processes)
+                                finish = True
+
+                    outputs = self.merge_process_outputs(outputs, queue_outputs)
+                    manager.shutdown()
+                else:
+                    outputs = func(self.database, **kwargs)
         else:
             outputs = func(self.database, **kwargs)
 

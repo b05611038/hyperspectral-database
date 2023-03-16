@@ -175,6 +175,11 @@ class HyperspectralDatabase(Database):
                 'port': self.port,
                 'gridfs': self.gridfs}
 
+    def close(self):
+        self.database = None
+        self.sync_wrapper = None
+        return None
+
     def find(self, query, collection = 'data'):
         if not isinstance(collection, str):
             raise TypeError('Argument: collection must be a Python string object.')
@@ -485,9 +490,6 @@ class HyperspectralDatabase(Database):
                                          spectral_collection = spectral_collection)
 
                 for doc in all_documents:
-                    if isinstance(doc, (list, tuple)):
-                        doc = doc[0]
-
                     if not isinstance(doc, dict):
                         raise TypeError('Error datatype for document.')
 
@@ -660,14 +662,12 @@ class HyperspectralDatabase(Database):
         if not isinstance(queries, (dict, list, tuple)):
             raise TypeError('Argument: queries must be a Python dict or list/tuple object.')
 
-        if isinstance(queries, dict):
-            queries = [queries]
+        if isinstance(queries, (list, tuple)):
+            for query in queries:
+                if not isinstance(query, dict):
+                    raise TypeError('Argument: query must be a Python ')
 
-        for query in queries:
-            if not isinstance(query, dict):
-                raise TypeError('Argument: query must be a Python ')
-
-        queries = {'$or': queries}
+            queries = {'$or': queries}
 
         if not isinstance(data_args, (list, tuple)):
             raise TypeError('Argument: data_args must be a Python list/tuple object.')
@@ -712,7 +712,7 @@ class HyperspectralDatabase(Database):
         print('Acquiring {0} data in the {1}.'.format(counting, 
                 self.__class__.__name__))
 
-        return inspected_data
+        return data
 
     def get_all_data(self, data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral')):
