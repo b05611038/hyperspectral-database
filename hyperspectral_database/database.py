@@ -1,224 +1,60 @@
 import os
-import abc
 import json
 import copy
 
 import numpy as np
 
 import gridfs
-from pymongo import (MongoClient,
-                     UpdateOne,
+from pymongo import (UpdateOne,
                      InsertOne, 
                      DeleteOne)
 
 from . import __version__
+from .base import Database
 from .utils import serialize, deserialize 
 from .template import Template
+from .synchronize import SynchronizedFunctionWapper 
+from .pipeline import get_spectral_gridfs, get_spectral_list 
 
 
 __all__ = ['HyperspectralDatabase']
 
 
-class Database(abc.ABC):
-    def __init__(self,
-            db_name,
-            user_id,
-            passwd,
-            host,
-            port):
-
-        if not isinstance(db_name, str):
-            raise TypeError('Argument: db_name must be a string.')
-
-        if not isinstance(user_id, str):
-            raise TypeError('Argument: user_id must be a string.')
-
-        if not isinstance(passwd, str):
-            raise TypeError('Argument: passwd must be a string.')
-
-        if not isinstance(host, str):
-            raise TypeError('Argument: host must be a string.')
-
-        if not isinstance(port, int):
-            raise TypeError('Argument: port must be a int.')
-
-        self._db_name = db_name
-        self._user_id = user_id
-        self._passwd = passwd
-        self._host = host
-        self._port = port
-
-        self.connect(self.host, self.port, self.db)
-        self.__tmp = {}
-
-    def connect(self, host, port, db_name):
-        self.mongo_client = MongoClient(host = host, port = port)
-        self.database = self.mongo_client[db_name]
-        print('Successfully connect the mongoDB server.')
-        return None
-
-    def temp_var(self, var):
-        if not isinstance(var, str):
-            raise TypeError('Argument: var must be a Python string object.')
-
-        if len(var) == 0:
-            raise ValueError('Argument: var cannot be empty string.')
-
-        stored_object = self.__tmp.get(var, None)
-        return stored_object
-
-    def add_temp_var(self, var, obj):
-        if not isinstance(var, str):
-            raise TypeError('Argument: var must be a Python string object.')
-
-        if len(var) == 0:
-            raise ValueError('Argument: var cannot be empty string.')
-
-        self.__tmp[var] = obj
-        return None
-
-    def delete_temp_var(self, var):
-        if not isinstance(var, str):
-            raise TypeError('Argument: var must be a Python string object.')
-
-        if self.__tmp.get(var, None) is not None:
-            del self.__tmp[var]
-
-        return None
-
-    def __eq__(self, other):
-        equal = False
-        if self.port == other.port and self.db == other.db and self.user == other.user \
-                and self.host == other.host:
-            equal = True
-
-        return equal
-
-    @abc.abstractmethod
-    def __repr__(self):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def help(self):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def find(self, collection, key_value_pair):
-        return NotImplementedError()
-
-    @abc.abstractmethod
-    def find_one(self, collection, key_value_pair):
-        return NotImplementedError()
-
-    @abc.abstractmethod
-    def count_documents(self, colleciton, key_value_pair):
-        return NotImplementedError()
-
-    @property
-    def host(self):
-        return self._host
-
-    @host.setter
-    def host(self, new_host, new_port = 27017):
-        if not isinstance(new_host, str):
-            raise TypeError('Argument: new_host must be a string.')
-
-        if not isinstance(new_port, int):
-            raise TypeError('Argument: new_port must be a int.')
-
-        self._host = new_host
-        self._port = new_port
-        self.reinit_db()
-
-        lprint('Successfully change database host.')
-
-        return None
-
-    @property
-    def port(self):
-        return self._port
-
-    @property
-    def db(self):
-        return self._db_name
-
-    @db.setter
-    def db(self, db_name):
-        if not isinstance(db_name, str):
-            raise TypeError('Argument: db must be a string.')
-
-        self._db_name = db_name
-        self.reinit_db()
-
-        lprint('Successfully change database name.')
-
-        return None
-
-    @property
-    def user(self):
-        return self._user_id
-
-    @user.setter
-    def user(self, new_id, new_passwd):
-        if not isinstance(new_id, str):
-            raise TypeError('Argument: new_id must be a string.')
-
-        if not isinstance(new_passwd, str):
-            raise TypeError('Argument: new_passwd must be a string.')
-
-        self._user_id = new_id
-        self._passwd = new_passwd
-        self.reinit_db()
-
-        lprint('Successfully change the user of Database client.')
-
-        return None
-
-    @property
-    def version(self):
-        return __version__
-
-    @property
-    def connected(self):
-        client_connect = True
-        if self.mongo_client is None:
-            client_connect = False
-
-        collection_acquire = True
-        if self.database is None:
-            collection_acquire = False
-
-        _connected = False
-        if client_connect and collection_acquire:
-            _connected = True
-
-        return _connected
-
-    def close(self):
-        self.mongo_client = None
-        self.database = None
-        self.__tmp = {}
-        return None
-
-
 class HyperspectralDatabase(Database):
     def __init__(self, 
-        db_name = 'hyperspectral',
-        user_id = '',
-        passwd = '',
-        host = '192.168.50.146',
-        port = 27087):
+            db_name = 'hyperspectral',
+            user_id = '',
+            passwd = '',
+            host = '192.168.50.146',
+            port = 27087,
+            query_size = 10000,
+            synchronize_worker = 4,
+            synchronize_timeout = -1,
+            memory_efficent_mode = True,
+            gridfs = True):
 
         super(HyperspectralDatabase, self).__init__(
-                db_name = db_name,
+                 db_name = db_name,
                  user_id = user_id,
                  passwd = passwd,
                  host = host,
                  port = port)
 
-        self._collection_list = ['data']
-        self.fs, self.collections = self._init_gridfs_collections(self.database, 
+        self.sync_wrapper = None
+        self._collection_list = ['data', 'spectral']
+        self.fs, self.collections = self._init_gridfs_collections(self.database,
                                                                   self._collection_list)
+
+        self.query_size = query_size
+        self.memory_efficent_mode = memory_efficent_mode # work when gridfs=False
+        self.gridfs = gridfs
+
+        self.synchronize_worker = synchronize_worker
+        self.synchronize_timeout = synchronize_timeout
+        self.sync_wrapper = SynchronizedFunctionWapper(self, 
+                query_size = query_size,
+                num_worker = synchronize_worker,
+                timeout = synchronize_timeout)
 
     def _init_gridfs_collections(self, database, name_list):
         fs = gridfs.GridFS(database)
@@ -227,6 +63,88 @@ class HyperspectralDatabase(Database):
             collections[name] = database[name]
         
         return fs, collections
+
+    @property
+    def gridfs(self):
+        return self._gridfs
+
+    @gridfs.setter
+    def gridfs(self, gridfs):
+        if not isinstance(gridfs, bool):
+            raise TypeError('Argument: gridfs must be a Python boolean object.')
+
+        self._gridfs = gridfs
+        return None
+
+    @property
+    def query_size(self):
+        return self._query_size
+
+    @query_size.setter
+    def query_size(self, query_size):
+        if not isinstance(query_size, int):
+            raise TypeError('Argument: query_size must be a Python int object.')
+
+        if query_size <= 0:
+            raise ValueError('Argument: query_size must at least be one.')
+
+        self._query_size = query_size
+        if self.sync_wrapper is not None:
+            self.sync_wrapper.query_size = query_size
+
+        return None
+
+    @property
+    def memory_efficent_mode(self):
+        return self._memory_efficent_mode
+
+    @memory_efficent_mode.setter
+    def memory_efficent_mode(self, memory_efficent_mode):
+        if not isinstance(memory_efficent_mode, bool):
+            raise TypeError('Argument: memory_efficent_mode must be a Python boolean object.')
+
+        self._memory_efficent_mode = memory_efficent_mode
+        return None
+
+    @property
+    def synchronize_worker(self):
+        return self._synchronize_worker
+
+    @synchronize_worker.setter
+    def synchronize_worker(self, synchronize_worker):
+        if not isinstance(synchronize_worker, int):
+            raise TypeError('Argument: synchronize_worker must be a Python int object.')
+
+        if synchronize_worker != -1:
+            if synchronize_worker < 0:
+                raise ValueError('Argument: synchronize_worker must larger than zero.') 
+
+        self._synchronize_worker = synchronize_worker
+        if self.sync_wrapper is not None:
+            self.sync_wrapper.num_worker = synchronize_worker
+
+        return None
+
+    @property
+    def synchronize_timeout(self):
+        return self._synchronize_timeout
+
+    @synchronize_timeout.setter
+    def synchronize_timeout(self, synchronize_timeout):
+        if synchronize_timeout != -1:
+            if not isinstance(synchronize_timeout, (int, float)):
+                raise TypeError('Argument: synchronize_timeout must be a Python float object.')
+
+            if synchronize_timeout <= 0:
+                raise ValueError('Argument: synchronize_timeout must be a Python float object.')
+
+            synchronize_timeout = float(synchronize_timeout)
+
+        self._synchronize_timeout = synchronize_timeout
+        if self.sync_wrapper is not None:
+            self.sync_wrapper.timeout = synchronize_timeout
+
+        return None
 
     def __repr__(self):
         lines = 'HyperspectralDatabase version: {0}\n'.format(__version__)
@@ -247,6 +165,15 @@ class HyperspectralDatabase(Database):
         print(lines[: -1])
 
         return None
+
+    def lightweighted_arguments(self):
+        # the attribute to initial lightweighted MongoDB client in other subprocess.
+        return {'db_name': self.db,
+                'user_id': self.user,
+                'passwd': self._passwd,
+                'host': self.host,
+                'port': self.port,
+                'gridfs': self.gridfs}
 
     def find(self, query, collection = 'data'):
         if not isinstance(collection, str):
@@ -279,13 +206,16 @@ class HyperspectralDatabase(Database):
         if collection.lower() not in self._collection_list:
             raise ValueError(collection, ' is not a valid collection selection.')
 
-        if not isinstance(query, dict):
+        if not isinstance(query,  dict):
             raise TypeError('The argument: query only accept Python dictionary object.')
 
         return self.collections[collection.lower()].count_documents(query)
 
-    def insert_data(self, file, file_extension = '.json', collection = 'data', 
-            data_args = ('datatype', 'species', 'spectral'), certain = False):
+    def insert_data(self, file, file_extension = '.json', 
+            data_collection = 'data', spectral_collection = 'spectral',
+            data_args = ('datatype', 'species', 'spectral'), gridfs = True, 
+            certain = False):
+
         if not isinstance(file, str):
             raise TypeError('Argument: file must be a Python string object.')
 
@@ -298,11 +228,21 @@ class HyperspectralDatabase(Database):
         if not file.endswith(file_extension):
             raise RuntimeError('Valid file must be a endswith {0}'.format(file_extension))
 
-        if not isinstance(collection, str):
-            raise TypeError('Argument: collection must be a Python string object.')
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
 
-        if collection.lower() not in self._collection_list:
-            raise ValueError(collection, ' is not a valid collection selection.')
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
 
         if not isinstance(data_args, (list, tuple)):
             raise TypeError('Argument: data_args must be a Python list/tuple object.')
@@ -311,17 +251,22 @@ class HyperspectralDatabase(Database):
             if not isinstance(e, str):
                 raise TypeError('Element in argument::data_args must be a Python string object.')
 
+        if not isinstance(gridfs, bool):
+            raise TypeError('Argument: gridfs must be a Python boolean object.')
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
-        single_document = self._single_data_document(file, data_args, collection, 
+        data_document, spectral_document = self._single_data_document(file, data_args, 
+                data_collection, spectral_collection,
+                gridfs = gridfs,
                 certain = certain)
 
         if certain:
-            requests = [InsertOne(single_document)]
-            if len(requests) > 0:
-                self.collections[collection].bulk_write(requests)
+            if spectral_document is not None:
+                self.collections[spectral_collection].bulk_write([InsertOne(spectral_document)])
 
+            self.collections[data_collection].bulk_write([InsertOne(data_document)])
             print('Successfully insert file:{0} into {1}'.format(file, 
                     self.__class__.__name__))
         else:
@@ -329,9 +274,10 @@ class HyperspectralDatabase(Database):
 
         return None
 
-    def batch_insert_data(self, directory, file_extension = '.json', collection = 'data', 
+    def batch_insert_data(self, directory, file_extension = '.json', 
+            data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral'), batch_size = 10000, 
-            certain = False, progress = True):
+            gridfs = True, certain = False, progress = True):
 
         if not isinstance(directory, str):
             raise TypeError('Argument: directory must be a Python string object')
@@ -342,11 +288,21 @@ class HyperspectralDatabase(Database):
         if not isinstance(file_extension, str):
             raise TypeError('Argument: file_extension must be a Python string object.')
 
-        if not isinstance(collection, str):
-            raise TypeError('Argument: collection must be a Python string object.')
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
 
-        if collection.lower() not in self._collection_list:
-            raise ValueError(collection, ' is not a valid collection selection.')
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
 
         if not isinstance(data_args, (list, tuple)):
             raise TypeError('Argument: data_args must be a Python list/tuple object.')
@@ -361,6 +317,9 @@ class HyperspectralDatabase(Database):
         if batch_size < 0:
             raise ValueError('Argument: batch_size must larger than zero.')
 
+        if not isinstance(gridfs, bool):
+            raise TypeError('Argument: gridfs must be a Python boolean object.')
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
@@ -374,14 +333,20 @@ class HyperspectralDatabase(Database):
 
         file_numbers = len(json_files)
         if certain:
-            requests, insert_index = [], self._get_insert_index()
+            data_col_requests, spectral_col_requests = [], []
+            insert_index = self._get_insert_index()
             running_index, inner_batch_index = 0, 0
             for f in json_files:
-                single_document = self._single_data_document(f, data_args, collection,
+                data_document, spectral_document = self._single_data_document(f, data_args, 
+                        data_collection, spectral_collection,
                         insert_index = insert_index,
+                        gridfs = gridfs,
                         certain = certain)
 
-                requests.append(InsertOne(single_document))
+                data_col_requests.append(InsertOne(data_document))
+                if spectral_col_requests is not None:
+                    spectral_col_requests.append(InsertOne(spectral_document))
+
                 insert_index += 1
                 inner_batch_index += 1
 
@@ -391,18 +356,22 @@ class HyperspectralDatabase(Database):
                                                                     file_numbers))
 
                 if inner_batch_index == batch_size:
-                    if len(requests) > 0:
-                        self.collections[collection].bulk_write(requests)
-                        print('Sucessfully insert {0} files into {1}'\
-                                .format(len(requests), self.__class__.__name__))
+                    if len(spectral_col_requests) > 0:
+                        self.collections[spectral_collection].bulk_write(spectral_col_requests)
+                        spectral_col_requests = []
 
-                        requests = []
+                    if len(data_col_requests) > 0:
+                        self.collections[data_collection].bulk_write(data_col_requests)
+                        print('Sucessfully insert {0} files into {1}'\
+                                .format(len(data_col_requests), self.__class__.__name__))
+
+                        data_col_requests = []
 
                     inner_batch_index = 0
                     print('Successfully reset file buffer.')
 
             if len(requests) > 0:
-                self.collections[collection].bulk_write(requests)
+                self.collections[data_collection].bulk_write(requests)
         else:
             print('Not certain mode, no insertion in the database.')
 
@@ -425,10 +394,13 @@ class HyperspectralDatabase(Database):
 
         return insert_index
 
-    def _single_data_document(self, json_file_path, data_args, collection, 
-            insert_index = None, certain = False):
+    def _single_data_document(self, json_file_path, data_args, 
+            data_collection, spectral_collection,
+            insert_index = None, gridfs = True, certain = False):
 
-        single_data_document, content = Template(collection), {}
+        content = {}
+        single_data_document = Template(data_collection)
+        single_spectral_document = Template(spectral_collection) 
         with open(json_file_path, 'r') as f:
             contents = json.loads(f.read())
             f.close()
@@ -440,9 +412,14 @@ class HyperspectralDatabase(Database):
             args_value = contents.get(args, None)
             if args_value is not None:
                 if args == 'spectral':
-                    if certain:
-                        args_value = serialize(args_value)
-                        args_value = self.fs.put(args_value)
+                    if gridfs:
+                        if certain:
+                            args_value = serialize(np.array(args_value,
+                                    dtype = np.float64))
+                            args_value = self.fs.put(args_value)
+                    else:
+                        args_value = list(np.array(args_value, dtype = np.float64))
+                        single_spectral_document['spectral'] = args_value
 
                 single_data_document[args] = args_value
 
@@ -450,8 +427,106 @@ class HyperspectralDatabase(Database):
             insert_index = self._get_insert_index()
 
         single_data_document['insert_index'] = insert_index
+        single_spectral_document['insert_index'] = insert_index
+        if self.gridfs:
+            single_spectral_document = None
 
-        return single_data_document
+        return single_data_document, single_spectral_document
+
+    def spectral_data_reformation(self, source, target, batch_size = 10000,
+            data_collection = 'data', spectral_collection = 'spectral', certain = False):
+
+        if not isinstance(batch_size, int):
+            raise TypeError('Argument: batch_size must be a Python int object.')
+
+        if batch_size < 0:
+            raise ValueError('Argument: batch_size must larger than zero.')
+
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
+
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
+
+        if not isinstance(source, str):
+            raise TypeError('Argument: source must be a Python string object.')
+
+        if not isinstance(target, str):
+            raise TypeError('Argument: target must be a Python string object.')
+
+        availabel_format = ['gridfs', 'list']
+        if source not in availabel_format:
+            raise ValueError('Invalid selection for argument: source.')
+
+        if target not in availabel_format:
+            raise ValueError('Invalid selection for argument: target.')
+
+        if source == target:
+            raise RuntimeError('Argument: source cannot be same as argument:target.')
+
+        original_gridfs_state = copy.deepcopy(self.gridfs)
+        if certain:
+            if source == 'gridfs' and target == 'list':
+                self.gridfs = True
+
+                spectral_documents = []
+                all_documents = self.get_all_data(data_args = ('spectral', 'insert_index'),
+                                         data_collection = data_collection,
+                                         spectral_collection = spectral_collection)
+
+                for doc in all_documents:
+                    if isinstance(doc, (list, tuple)):
+                        doc = doc[0]
+
+                    if not isinstance(doc, dict):
+                        raise TypeError('Error datatype for document.')
+
+                    insert_index = doc.get('insert_index', None)
+                    spectral_data = doc.get('spectral', None)
+                    if spectral_data is not None:
+                        spectral_data = list(spectral_data)
+
+                    if insert_index is not None:
+                        spectral_document = Template(spectral_collection)
+                        spectral_document['insert_index'] = insert_index
+                        spectral_document['spectral'] = spectral_data
+                        spectral_documents.append(spectral_document)
+
+                requests, inner_batch_index = [], 0
+                for spectral_doc in spectral_documents:
+                    requests.append(InsertOne(spectral_doc))
+                    inner_batch_index += 1
+
+                    if inner_batch_index == batch_size:
+                        self.collections[spectral_collection].bulk_write(requests)
+                        requests, inner_batch_index = [], 0
+
+                if len(requests) > 0:
+                    self.collections[spectral_collection].bulk_write(requests)
+
+            elif source == 'list' and target == 'gridfs':
+                raise NotImplementedError('Please ask developer for further help.')
+            else:
+                raise ValueError('Method:spectral_data_reformation was not available' + \
+                        ' under the setting.')
+
+            print('From {0} to {1} reformation finish.'.format(source, target))
+            self.gridfs = original_gridfs_state
+
+        else:
+            print('Not certain mode, no reformation process happen.')
+
+        return None
 
     def _delete_gridfs_object(self, object_pointer):
         if object_pointer != 'unknown':
@@ -459,36 +534,52 @@ class HyperspectralDatabase(Database):
 
         return None 
 
-    def delete_data(self, indices, collection = 'data', certain = False):
+    def delete_data(self, indices, data_collection = 'data', spectral_collection = 'spectral',
+            certain = False):
+
         if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
 
         if isinstance(indices, int):
             indices = [indices]
 
-        if not isinstance(collection, str):
-            raise TypeError('Argument: collection must be a Python string object.')
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
 
-        if collection.lower() not in self._collection_list:
-            raise ValueError(collection, ' is not a valid collection selection.')
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
 
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            requests, need_to_delete_pointers = [], []
+            data_requests, spectral_requests, need_to_delete_pointers = [], [], []
             for index in indices:
-                docs = self.find({'insert_index': index})
-                for doc in docs:
+                data_docs = self.find({'insert_index': index}, collection = data_collection)
+                for doc in data_docs:
                     object_pointer = doc.get('spectral', 'unknown')
 
                 need_to_delete_pointers.append(object_pointer)
-                requests.append(DeleteOne({'insert_index': index}))
+                data_requests.append(DeleteOne({'insert_index': index}))
+                spectral_requests.append(DeleteOne({'insert_index': index}))
 
-            if len(requests) > 0:
-                self.collections[collection].bulk_write(requests)
+            if len(data_requests) > 0:
+                self.collections[data_collection].bulk_write(data_requests)
                 for pointer in need_to_delete_pointers:
                     self._delete_gridfs_object(pointer)
+
+            if len(spectral_requests) > 0:
+                self.collections[spectral_collection].bulk_write(spectral_requests)
 
             print('Successfully delete data with indices:{0}'.format(indices))
         else:
@@ -496,30 +587,50 @@ class HyperspectralDatabase(Database):
 
         return None
 
-    def delete_all(self, collection = 'data', certain = False):
-        if not isinstance(collection, str):
-            raise TypeError('Argument: collection must be a Python string object.')
+    def delete_all(self, data_collection = 'data', spectral_collection = 'spectral',
+            certain = False):
 
-        if collection.lower() not in self._collection_list:
-            raise ValueError(collection, ' is not a valid collection selection.')
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
+
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
 
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            requests, need_to_delete_pointers = [], []
-            documents = self.find({}, collection = collection)
+            data_requests, spectral_requests, need_to_delete_pointers = [], [], []
+            documents = self.find({}, collection = data_collection)
             for doc in documents:
                 object_id = doc.get('_id', None)
                 data_pointer = doc.get('spectral', 'unknown')
                 if object_id is not None:
-                    requests.append(DeleteOne({'_id': object_id}))
+                    data_requests.append(DeleteOne({'_id': object_id}))
                     need_to_delete_pointers.append(data_pointer)
 
-            if len(requests) > 1:
-                self.collections[collection].bulk_write(requests)
+            documents = self.find({}, collection = spectral_collection)
+            for doc in documents:
+                object_id = doc.get('_id', None)
+                spectral_requests.append(DeleteOne({'_id': object_id}))
+
+            if len(data_requests) > 1:
+                self.collections[data_collection].bulk_write(data_requests)
                 for pointer in need_to_delete_pointers:
                     self._delete_gridfs_object(pointer)
+
+            if len(spectral_requests) > 1:
+                self.collections[spectral_collection].bulk_write(spectral_requests)
 
             print('Successfully clear all data in {0}'.format(self.__class__.__name__))
         else:
@@ -527,8 +638,25 @@ class HyperspectralDatabase(Database):
 
         return None
 
-    def get_data(self, queries, collection = 'data', 
+    def get_data(self, queries, data_collection = 'data', spectral_collection = 'spectral',
                 data_args = ('datatype', 'species', 'spectral')):
+
+        if not isinstance(data_collection, str):
+            raise TypeError('Argument: data_collection must be a Python string object.')
+
+        if data_collection.lower() not in self._collection_list:
+            raise ValueError(data_collection, ' is not a valid collection selection.')
+
+        data_collection = data_collection.lower()
+
+        if not isinstance(spectral_collection, str):
+            raise TypeError('Argument: spectral_collection must be a Python string object.')
+
+        if spectral_collection.lower() not in self._collection_list:
+            raise ValueError(spectral_collection, ' is not a valid collection selection.')
+
+        spectral_collection = spectral_collection.lower()
+
         if not isinstance(queries, (dict, list, tuple)):
             raise TypeError('Argument: queries must be a Python dict or list/tuple object.')
 
@@ -539,11 +667,7 @@ class HyperspectralDatabase(Database):
             if not isinstance(query, dict):
                 raise TypeError('Argument: query must be a Python ')
 
-        if not isinstance(collection, str):
-            raise TypeError('Argument: collection must be a Python string object.')
-
-        if collection not in self._collection_list:
-            raise ValueError(collection, ' is not a valid collection selection.')
+        queries = {'$or': queries}
 
         if not isinstance(data_args, (list, tuple)):
             raise TypeError('Argument: data_args must be a Python list/tuple object.')
@@ -553,34 +677,53 @@ class HyperspectralDatabase(Database):
                 raise TypeError('Element in argument::data_args must be a Python string object.')
 
         data, counting = [], 0
-        for query in queries:
-            tmp_cursor = self.find(query, collection = collection)
-            for doc in tmp_cursor:
-                single_data = {}
-                for args in data_args:
-                    args_value = doc.get(args, 'unknown')
-                    if args == 'spectral':
-                        args_value = self.fs.get(args_value).read()
-                        args_value = deserialize(args_value)
+        if not self.gridfs:
+            if 'insert_index' not in data_args:
+                original_data_args = copy.deepcopy(data_args)
+                data_args = list(data_args) + ['insert_index']
+            else:
+                original_data_args = None
 
-                    single_data[args] = args_value
+        tmp_cursor = self.find(queries, collection = data_collection)
+        for doc in tmp_cursor:
+            single_data = {}
+            for args in data_args:
+                args_value = doc.get(args, 'unknown')
+                single_data[args] = args_value
 
-                data.append(single_data)
-                counting += 1
+            data.append(single_data)
+            counting += 1
+
+        if 'spectral' in data_args:
+            if self.gridfs:
+                data = self.sync_wrapper(get_spectral_gridfs, 
+                                         sync_args = ('docs', ),
+                                         docs = data)
+            else:
+                if self.memory_efficent_mode:
+                    data = self.sync_wrapper(get_spectral_list,
+                                             sync_args = ('docs', ),
+                                             docs = data,
+                                             original_data_args = original_data_args,
+                                             spectral_collection = spectral_collection)
+                else:
+                    raise NotImplementedError('Please contact developer.')
 
         print('Acquiring {0} data in the {1}.'.format(counting, 
                 self.__class__.__name__))
 
-        return data
+        return inspected_data
 
-    def get_all_data(self, collection = 'data', 
+    def get_all_data(self, data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral')):
 
-        return self.get_data({}, collection = collection,
+        return self.get_data({}, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
                                  data_args = data_args)
 
-    def get_data_by_indices(self, indices, collection = 'data',
-                data_args = ('datatype', 'species', 'spectral')):
+    def get_data_by_indices(self, indices, 
+            data_collection = 'data', spectral_collection = 'spectral', 
+            data_args = ('datatype', 'species', 'spectral')):
  
        if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
@@ -592,11 +735,12 @@ class HyperspectralDatabase(Database):
        for index in indices:
            queries.append({'insert_index': index})
 
-       return self.get_data(queries,
-                            collection = collection,
-                            data_args = data_args)
+       return self.get_data(queries, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
+                                 data_args = data_args)
 
-    def get_data_by_index_range(self, start, stop = None, step = None, collection = 'data',
+    def get_data_by_index_range(self, start, stop = None, step = None,
+                data_collection = 'data', spectral_collection = 'spectral',
                 data_args = ('datatype', 'species', 'spectral')):
 
         if not isinstance(start, int):
@@ -616,12 +760,13 @@ class HyperspectralDatabase(Database):
             start = 0
 
         indices = [i for i in range(start, stop, step)]
-        return self.get_data_by_indices(indices, 
-                                        collection = collection,
-                                        data_args = data_args)
+        return self.get_data_by_indices(indices, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
+                                 data_args = data_args) 
 
-    def get_data_by_datatypes(self, datatypes, collection = 'data',
-                data_args = ('datatype', 'species', 'spectral')):
+    def get_data_by_datatypes(self, datatypes, 
+            data_collection = 'data', spectral_collection = 'spectral',
+            data_args = ('datatype', 'species', 'spectral')):
 
         if not isinstance(datatypes, (str, list, tuple)):
             raise TypeError('Arguemnt: datatypes must be a Python string or list/tuple object.')
@@ -637,12 +782,13 @@ class HyperspectralDatabase(Database):
         for datatype in datatypes:
             queries.append({'datatype': datatype})
 
-        return self.get_data(queries,
-                            collection = collection,
-                            data_args = data_args)
+        return self.get_data(queries, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
+                                 data_args = data_args)
 
     def get_data_by_species(self, species, collection = 'data',
-                data_args = ('datatype', 'species', 'spectral')):
+            data_collection = 'data', spectral_collection = 'spectral',
+            data_args = ('datatype', 'species', 'spectral')):
 
         if not isinstance(species, (str, list, tuple)):
             raise TypeError('Arguemnt: species must be a Python string or list/tuple object.')
@@ -658,8 +804,8 @@ class HyperspectralDatabase(Database):
         for s in species:
             queries.append({'species': s})
 
-        return self.get_data(queries,
-                            collection = collection,
-                            data_args = data_args)
-    
+        return self.get_data(queries, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
+                                 data_args = data_args)
+
 
