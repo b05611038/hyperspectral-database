@@ -3,6 +3,17 @@ import argparse
 
 from hyperspectral_database import HyperspectralDatabase
 
+
+def get_data_api_tesing(db):
+    data = db.get_data_by_indices([0])
+    data = db.get_data_by_index_range(1)
+    data = db.get_data_by_index_range(0, 2)
+    data = db.get_data_by_index_range(0, 2, 1)
+    data = db.get_data_by_datatypes(['y-injured-like'])
+    data = db.get_data_by_species(['tea12'])
+    data = db.get_all_data()
+    return data
+
 def test_API(db, io_testing = False, delete_testing = False, data_path = None):
     if data_path is None:
        raise RuntimeError('Argument: data_path not set.')
@@ -12,14 +23,25 @@ def test_API(db, io_testing = False, delete_testing = False, data_path = None):
     cursor = db.find_one({})
     sample_number = db.count_documents({})
     if sample_number > 0:
-        data = db.get_data_by_indices([0])
-        data = db.get_data_by_index_range(1)
-        data = db.get_data_by_index_range(0, 1)
-        data = db.get_data_by_index_range(0, 1, 1)
-        data = db.get_data_by_datatypes(['y-injured-like'])
-        data = db.get_data_by_species(['tea12'])
-        data = db.get_all_data()
-        print('Data acquring API testing finish.')
+        db.gridfs = True
+        db.synchronize_worker = -1
+        get_data_api_tesing(db)
+        print('Data acquring API (gridfs=True, single-process) testing finish.')
+
+        db.gridfs = True
+        db.synchronize_worker = 4
+        get_data_api_tesing(db)
+        print('Data acquring API (gridfs=True, multi-process) testing finish.')
+
+        db.gridfs = False
+        db.synchronize_worker = -1
+        get_data_api_tesing(db)
+        print('Data acquring API (gridfs=False, single-process) testing finish.')
+
+        db.gridfs = False
+        db.synchronize_worker = 4
+        get_data_api_tesing(db)
+        print('Data acquring API (gridfs=False, multi-process) testing finish.')
     else:
         print('Because no data in database, not testing API of acquring data.')
 
@@ -66,6 +88,12 @@ def main():
             help = 'The host of the deployed MongoDB.')
     parser.add_argument('--port', type = int, default = 27087,
             help = 'The port of the deployed MongoDB.')
+    parser.add_argument('--query_size', type = int, default = 10000,
+            help = 'The partition size of the sycn_wrapper.')
+    parser.add_argument('--synchronize_worker', type = int, default = 4,
+            help = 'The process number of the multiprocessing.')
+    parser.add_argument('--from_list_collection', action = 'store_true',
+            help = 'Grab the data from list collection.')
     parser.add_argument('--io_testing', action = 'store_true',
             help = 'Test the IO API of the database object.' + \
             ' Please do not run if you are not developer.')
@@ -75,11 +103,18 @@ def main():
 
     args = parser.parse_args()
 
+    gridfs = True
+    if args.from_list_collection:
+        gridfs = False
+
     db = HyperspectralDatabase(db_name = args.db_name,
                                user_id = args.user_id,
                                passwd = args.passwd,
                                host = args.host,
-                               port = args.port)
+                               port = args.port,
+                               query_size = args.query_size,
+                               synchronize_worker = args.synchronize_worker,
+                               gridfs = gridfs)
 
     test_API(db, io_testing = args.io_testing,
                  delete_testing = args.delete_testing,

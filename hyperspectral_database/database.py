@@ -1,6 +1,7 @@
 import os
 import json
 import copy
+import warnings
 
 import numpy as np
 
@@ -27,11 +28,12 @@ class HyperspectralDatabase(Database):
             passwd = '',
             host = '192.168.50.146',
             port = 27087,
-            query_size = 10000,
-            synchronize_worker = 4,
+            query_size = 1000,
+            docs_num_per_request = 100000,
+            synchronize_worker = -1,
             synchronize_timeout = -1,
             memory_efficent_mode = True,
-            gridfs = True):
+            gridfs = False):
 
         super(HyperspectralDatabase, self).__init__(
                  db_name = db_name,
@@ -47,6 +49,7 @@ class HyperspectralDatabase(Database):
 
         self.query_size = query_size
         self.memory_efficent_mode = memory_efficent_mode # work when gridfs=False
+        self.docs_num_per_request = docs_num_per_request
         self.gridfs = gridfs
 
         self.synchronize_worker = synchronize_worker
@@ -72,6 +75,11 @@ class HyperspectralDatabase(Database):
     def gridfs(self, gridfs):
         if not isinstance(gridfs, bool):
             raise TypeError('Argument: gridfs must be a Python boolean object.')
+
+        if gridfs:
+            warnings.warn('Although the Gridfs mode can access the original' + \
+                    ' binary file in the {0}, it is very inefficient.'\
+                    .format(self.__class__.__name__))
 
         self._gridfs = gridfs
         return None
@@ -104,6 +112,21 @@ class HyperspectralDatabase(Database):
             raise TypeError('Argument: memory_efficent_mode must be a Python boolean object.')
 
         self._memory_efficent_mode = memory_efficent_mode
+        return None
+
+    @property
+    def docs_num_per_request(self):
+        return self._docs_num_per_request
+
+    @docs_num_per_request.setter
+    def docs_num_per_request(self, docs_num_per_request):
+        if not isinstance(docs_num_per_request, int):
+            raise TypeError('Argument: docs_num_per_request must be a Python int object.')
+
+        if docs_num_per_request <= 0:
+            raise TypeError('Argument: docs_num_per_request must at least be one.')
+
+        self._docs_num_per_request = docs_num_per_request
         return None
 
     @property
@@ -149,6 +172,8 @@ class HyperspectralDatabase(Database):
     def __repr__(self):
         lines = 'HyperspectralDatabase version: {0}\n'.format(__version__)
         lines += '  User: {0}\n  Host: {1}\n  Port: {2}\n'.format(self.user, self.host, self.port)
+        lines += '  Gridfs mode: {0}\n  Memory efficient mode: {1}\n'\
+                .format(self.gridfs, self.memory_efficent_mode)
         lines += '  Database: {0}\n    Collections:\n'.format(self.db)
         for col in self._collection_list:
             lines += '      {0}\n'.format(col)
@@ -641,7 +666,7 @@ class HyperspectralDatabase(Database):
         return None
 
     def get_data(self, queries, data_collection = 'data', spectral_collection = 'spectral',
-                data_args = ('datatype', 'species', 'spectral')):
+                data_args = ('datatype', 'species', 'spectral'), hint = True):
 
         if not isinstance(data_collection, str):
             raise TypeError('Argument: data_collection must be a Python string object.')
@@ -676,7 +701,10 @@ class HyperspectralDatabase(Database):
             if not isinstance(e, str):
                 raise TypeError('Element in argument::data_args must be a Python string object.')
 
-        data, counting = [], 0
+        if not isinstance(hint, bool):
+            raise TypeError('Argument: hint must be a Python boolean object.')
+
+        data = []
         if not self.gridfs:
             if 'insert_index' not in data_args:
                 original_data_args = copy.deepcopy(data_args)
@@ -692,7 +720,6 @@ class HyperspectralDatabase(Database):
                 single_data[args] = args_value
 
             data.append(single_data)
-            counting += 1
 
         if 'spectral' in data_args:
             if self.gridfs:
@@ -709,21 +736,86 @@ class HyperspectralDatabase(Database):
                 else:
                     raise NotImplementedError('Please contact developer.')
 
-        print('Acquiring {0} data in the {1}.'.format(counting, 
-                self.__class__.__name__))
+        if hint:
+            print('Acquiring {0} data in the {1}.'.format(len(data), 
+                    self.__class__.__name__))
 
         return data
 
-    def get_all_data(self, data_collection = 'data', spectral_collection = 'spectral',
-            data_args = ('datatype', 'species', 'spectral')):
+    def _get_docs_only_with_insert_index(self, queries, data_collection):
+        docs = []
+        tmp_cursor = self.find(queries, collection = data_collection)
+        for doc in tmp_cursor:
+            single_data = {}
+            insert_index = doc.get('insert_index', None)
+            if insert_index is None:
+                raise RuntimeError('Cannot get insert index in document, please check source code.')
 
-        return self.get_data({}, data_collection = data_collection,
-                                 spectral_collection = spectral_collection,
-                                 data_args = data_args)
+            single_data['insert_index'] = insert_index
+            docs.append(single_data)
+
+        return docs
+
+    def _efficiently_get_data_by_proper_split(self, 
+            docs_without_spectral, 
+            data_collection,
+            spectral_collection, 
+            data_args, hint):
+
+        indices = []
+        for doc in docs_without_spectral:
+            index = doc['insert_index']
+            indices.append(int(index))
+
+        original_gridfs_mode, original_sync_worker = self.gridfs, self.synchronize_worker
+        self.gridfs, self.synchronize_worker = False, -1
+        splits = len(docs_without_spectral) // self.docs_num_per_request
+        if (len(docs_without_spectral) % self.docs_num_per_request) != 0:
+            splits += 1
+
+        data = []
+        for i in range(splits):
+            start_index = int(i * self.docs_num_per_request)
+            end_index = int((i + 1) * self.docs_num_per_request)
+            if end_index > len(indices):
+                end_index = len(indices)
+
+            split_indices = indices[start_index: end_index]
+            split_data = self.get_data_by_indices(split_indices, 
+                    data_collection = data_collection,
+                    spectral_collection = spectral_collection,
+                    data_args = data_args,
+                    hint = False)
+
+            data += split_data
+
+        self.gridfs, self.synchronize_worker = original_gridfs_mode, original_sync_worker
+        if hint:
+            print('Acquiring {0} data in the {1}.'.format(len(data),
+                    self.__class__.__name__))
+
+        return data
+        
+
+    def get_all_data(self, data_collection = 'data', spectral_collection = 'spectral',
+            data_args = ('datatype', 'species', 'spectral'), hint = True):
+
+        docs_num = self.count_documents({}, collection = data_collection)
+        if docs_num > self.docs_num_per_request:
+            tmp_docs = self._get_docs_only_with_insert_index({}, data_collection)
+            data = self._efficiently_get_data_by_proper_split(tmp_docs,
+                    data_collection, spectral_collection, data_args, hint)
+        else:
+            data = self.get_data({}, data_collection = data_collection,
+                                     spectral_collection = spectral_collection,
+                                     data_args = data_args,
+                                     hint = hint)
+
+        return data
 
     def get_data_by_indices(self, indices, 
             data_collection = 'data', spectral_collection = 'spectral', 
-            data_args = ('datatype', 'species', 'spectral')):
+            data_args = ('datatype', 'species', 'spectral'), hint = True):
  
        if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
@@ -737,11 +829,12 @@ class HyperspectralDatabase(Database):
 
        return self.get_data(queries, data_collection = data_collection,
                                  spectral_collection = spectral_collection,
-                                 data_args = data_args)
+                                 data_args = data_args,
+                                 hint = hint)
 
     def get_data_by_index_range(self, start, stop = None, step = None,
                 data_collection = 'data', spectral_collection = 'spectral',
-                data_args = ('datatype', 'species', 'spectral')):
+                data_args = ('datatype', 'species', 'spectral'), hint = True):
 
         if not isinstance(start, int):
             raise TypeError('Input argument must be a Python int object.')
@@ -762,11 +855,12 @@ class HyperspectralDatabase(Database):
         indices = [i for i in range(start, stop, step)]
         return self.get_data_by_indices(indices, data_collection = data_collection,
                                  spectral_collection = spectral_collection,
-                                 data_args = data_args) 
+                                 data_args = data_args,
+                                 hint = hint) 
 
     def get_data_by_datatypes(self, datatypes, 
             data_collection = 'data', spectral_collection = 'spectral',
-            data_args = ('datatype', 'species', 'spectral')):
+            data_args = ('datatype', 'species', 'spectral'), hint = True):
 
         if not isinstance(datatypes, (str, list, tuple)):
             raise TypeError('Arguemnt: datatypes must be a Python string or list/tuple object.')
@@ -782,13 +876,27 @@ class HyperspectralDatabase(Database):
         for datatype in datatypes:
             queries.append({'datatype': datatype})
 
-        return self.get_data(queries, data_collection = data_collection,
+        if len(queries) > 1:
+            count_query = {'$or': queries}
+        else:
+            count_query = queries[0]
+
+        docs_num = self.count_documents(count_query, collection = data_collection)
+        if docs_num > self.docs_num_per_request:
+            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
+            data = self._efficiently_get_data_by_proper_split(tmp_docs, 
+                    data_collection, spectral_collection, data_args, hint)
+        else:
+            data  = self.get_data(queries, data_collection = data_collection,
                                  spectral_collection = spectral_collection,
-                                 data_args = data_args)
+                                 data_args = data_args,
+                                 hint = hint)
+
+        return data
 
     def get_data_by_species(self, species, collection = 'data',
             data_collection = 'data', spectral_collection = 'spectral',
-            data_args = ('datatype', 'species', 'spectral')):
+            data_args = ('datatype', 'species', 'spectral'), hint = True):
 
         if not isinstance(species, (str, list, tuple)):
             raise TypeError('Arguemnt: species must be a Python string or list/tuple object.')
@@ -804,8 +912,22 @@ class HyperspectralDatabase(Database):
         for s in species:
             queries.append({'species': s})
 
-        return self.get_data(queries, data_collection = data_collection,
+        if len(queries) > 1:
+            count_query = {'$or': queries}
+        else:
+            count_query = queries[0]
+
+        docs_num = self.count_documents(count_query, collection = data_collection)
+        if docs_num > self.docs_num_per_request:
+            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
+            data = self._efficiently_get_data_by_proper_split(tmp_docs, 
+                    data_collection, spectral_collection, data_args, hint)
+        else:
+            data  = self.get_data(queries, data_collection = data_collection,
                                  spectral_collection = spectral_collection,
-                                 data_args = data_args)
+                                 data_args = data_args,
+                                 hint = hint)
+
+        return data
 
 

@@ -50,7 +50,7 @@ def run_worker(rank,
                 contents = inputs_container.get(argument, None)
                 if contents is None:
                     partition_mode = False
-                    contents = shared_container.get(argument, None)
+                    contents = shared_arguments.get(argument, None)
 
                 if contents is None:
                     raise RuntimeError('Loss argument in subprocess, ' + \
@@ -335,10 +335,13 @@ class SynchronizedFunctionWapper:
                 .format(self.query_size, self.num_worker, timeout)
 
     def merge_process_outputs(self, outputs, queue_outputs):
-        if not queue_outputs.empty():
-            docs = queue_outputs.get()
-            for doc in docs:
-                outputs.append(doc)
+        while True:
+            if not queue_outputs.empty():
+                docs = queue_outputs.get()
+                for doc in docs:
+                    outputs.append(doc)
+            else:
+                break
 
         return outputs
 
