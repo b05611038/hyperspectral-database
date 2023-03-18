@@ -464,7 +464,8 @@ class HyperspectralDatabase(Database):
         return single_data_document, single_spectral_document
 
     def spectral_data_reformation(self, source, target, batch_size = 10000,
-            data_collection = 'data', spectral_collection = 'spectral', certain = False):
+            data_collection = 'data', spectral_collection = 'spectral', 
+            certain = False, hint = True):
 
         if not isinstance(batch_size, int):
             raise TypeError('Argument: batch_size must be a Python int object.')
@@ -494,6 +495,12 @@ class HyperspectralDatabase(Database):
         if not isinstance(target, str):
             raise TypeError('Argument: target must be a Python string object.')
 
+        if not isinstance(certain, bool):
+            raise TypeError('Argument: certain must be a Python boolean object.')
+
+        if not isinstance(hint, bool):
+            raise TypeError('Argument: hint must be a Python boolean object.')
+
         availabel_format = ['gridfs', 'list']
         if source not in availabel_format:
             raise ValueError('Invalid selection for argument: source.')
@@ -510,36 +517,59 @@ class HyperspectralDatabase(Database):
                 self.gridfs = True
 
                 spectral_documents = []
-                all_documents = self.get_all_data(data_args = ('spectral', 'insert_index'),
-                                         data_collection = data_collection,
-                                         spectral_collection = spectral_collection)
+                doc_nums = self.count_documents({}, collection = data_collection)
+                indices_in_docs = []
+                docs_in_data_collection = self.find({}, collection = data_collection)
+                for doc in docs_in_data_collection:
+                    index_in_doc = doc.get('insert_index', None)
+                    if index_in_doc is None:
+                        raise RuntimeError('Cannot get args:insert_index in doc, please contact developer.')
+                    else:
+                        indices_in_docs.append(index_in_doc)
 
-                for doc in all_documents:
-                    if not isinstance(doc, dict):
-                        raise TypeError('Error datatype for document.')
+                splits = doc_nums // batch_size
+                if (doc_nums % batch_size) != 0:
+                    splits += 1
 
-                    insert_index = doc.get('insert_index', None)
-                    spectral_data = doc.get('spectral', None)
-                    if spectral_data is not None:
-                        spectral_data = list(spectral_data)
+                for split_index in range(splits):
+                    start_index = split_index * batch_size
+                    end_index = (split_index + 1) * batch_size
+                    if end_index > len(indices_in_docs):
+                        end_index = len(indices_in_docs)
 
-                    if insert_index is not None:
-                        spectral_document = Template(spectral_collection)
-                        spectral_document['insert_index'] = insert_index
-                        spectral_document['spectral'] = spectral_data
-                        spectral_documents.append(spectral_document)
+                    split_indices = indices_in_docs[start_index: end_index]
+                    contained_spectral_data = self.get_data_by_indices(
+                            split_indices, 
+                            data_args = ('spectral', 'insert_index'),
+                            data_collection = data_collection,
+                            spectral_collection = spectral_collection)
 
-                requests, inner_batch_index = [], 0
-                for spectral_doc in spectral_documents:
-                    requests.append(InsertOne(spectral_doc))
-                    inner_batch_index += 1
+                    requests = []
+                    for doc in contained_spectral_data:
+                        if not isinstance(doc, dict):
+                            raise TypeError('Error datatype for document.')
 
-                    if inner_batch_index == batch_size:
+                        insert_index = doc.get('insert_index', None)
+                        spectral_data = doc.get('spectral', None)
+                        if spectral_data is not None:
+                            spectral_data = list(spectral_data)
+                        else:
+                            warnings.warn('spectral_data in index: {0} cannot transfrom to list.'\
+                                    .format(insert_index))
+                            spectral_data = 'unknown'
+                        
+                        if insert_index is not None:
+                            spectral_document = Template(spectral_collection)
+                            spectral_document['insert_index'] = insert_index
+                            spectral_document['spectral'] = spectral_data
+                            requests.append(InsertOne(spectral_document))
+
+                    if len(requests) > 0:
                         self.collections[spectral_collection].bulk_write(requests)
-                        requests, inner_batch_index = [], 0
 
-                if len(requests) > 0:
-                    self.collections[spectral_collection].bulk_write(requests)
+                    if hint:
+                        print('Successfully write {0} files into collection:{1}, progress: {2}/{3}'\
+                                    .format(len(requests), spectral_collection, split_index + 1, splits))
 
             elif source == 'list' and target == 'gridfs':
                 raise NotImplementedError('Please ask developer for further help.')
@@ -547,9 +577,10 @@ class HyperspectralDatabase(Database):
                 raise ValueError('Method:spectral_data_reformation was not available' + \
                         ' under the setting.')
 
-            print('From {0} to {1} reformation finish.'.format(source, target))
-            self.gridfs = original_gridfs_state
+            if hint:
+                print('From {0} to {1} reformation finish.'.format(source, target))
 
+            self.gridfs = original_gridfs_state
         else:
             print('Not certain mode, no reformation process happen.')
 
