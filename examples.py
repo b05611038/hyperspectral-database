@@ -1,3 +1,5 @@
+import random
+
 from hyperspectral_database import HyperspectralDatabase
 
 def acquire_data_examples():
@@ -20,8 +22,23 @@ def acquire_data_examples():
 
     return None
 
+def random_sampling_all_data():
+    ratio = 0.2
+    db = HyperspectralDatabase()
+    all_inidces = db.get_all_indices()
+    sample_num = len(all_inidces)
+    if sample_num > 0:
+        sampling_to_this_index = round(sample_num * ratio)
+
+        random.shuffle(all_inidces)
+        used_for_sampling_indices = all_inidces[: sampling_to_this_index]
+        data = db.get_data_by_indices(used_for_sampling_indices)
+
+    return None
+
 def main():
     acquire_data_examples()
+    random_sampling_all_data()
     print('examples.py finish.')
 
 if __name__ == '__main__':

@@ -42,6 +42,13 @@ def test_API(db, io_testing = False, delete_testing = False, data_path = None):
         db.synchronize_worker = 4
         get_data_api_tesing(db)
         print('Data acquring API (gridfs=False, multi-process) testing finish.')
+
+        indices = db.get_all_indices()
+        indices = db.get_indices([{'datatypes': 'y-injured-like'},
+                                  {'species': 'tea12'}])
+        indices = db.get_indices_by_datatypes(['y-injured-like'])
+        indices = db.get_indices_by_species(['tea12'])
+        print('Indices acquring API testing finish.')
     else:
         print('Because no data in database, not testing API of acquring data.')
 

@@ -925,7 +925,7 @@ class HyperspectralDatabase(Database):
 
         return data
 
-    def get_data_by_species(self, species, collection = 'data',
+    def get_data_by_species(self, species, 
             data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral'), hint = True):
 
@@ -960,5 +960,68 @@ class HyperspectralDatabase(Database):
                                  hint = hint)
 
         return data
+
+    def get_indices(self, queries, collection = 'data'):
+        if not isinstance(queries, (dict, list, tuple)):
+            raise TypeError('Argument: queries must be a Python dict or list/tuple object.')
+
+        if isinstance(queries, (list, tuple)):
+            for query in queries:
+                if not isinstance(query, dict):
+                    raise TypeError('Argument: query must be a Python ')
+
+            queries = {'$or': queries}
+
+        if not isinstance(collection, str):
+            raise TypeError('Argument: collection must be a Python string object.')
+
+        if collection.lower() not in self._collection_list:
+            raise ValueError(collection, ' is not a valid collection selection.')
+
+        indices = []
+        tmp_cursor = self.find(queries, collection = collection)
+        for doc in tmp_cursor:
+            index = doc.get('insert_index', None)
+            if index is not None:
+                indices.append(int(index))
+
+        return indices
+
+    def get_all_indices(self, collection = 'data'):
+        return self.get_indices({}, collection = collection)
+
+    def get_indices_by_datatypes(self, datatypes, collection = 'data'):
+        if not isinstance(datatypes, (str, list, tuple)):
+            raise TypeError('Arguemnt: datatypes must be a Python string or list/tuple object.')
+
+        if isinstance(datatypes, str):
+            datatypes = [datatypes]
+
+        for e in datatypes:
+            if not isinstance(e, str):
+                raise TypeError('Element in argument:datatypes must be a Python string object.')
+
+        queries = []
+        for datatype in datatypes:
+            queries.append({'datatype': datatype})
+
+        return self.get_indices(queries, collection = collection)
+
+    def get_indices_by_species(self, species, collection = 'data'):
+        if not isinstance(species, (str, list, tuple)):
+            raise TypeError('Arguemnt: species must be a Python string or list/tuple object.')
+
+        if isinstance(species, str):
+            species = [species]
+
+        for s in species:
+            if not isinstance(s, str):
+                raise TypeError('Element in argument:species must be a Python string object.')
+
+        queries = []
+        for s in species:
+            queries.append({'species': s})
+
+        return self.get_indices(queries, collection = collection)
 
 
