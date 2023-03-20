@@ -29,8 +29,8 @@ class HyperspectralDatabase(Database):
             host = '192.168.50.146',
             port = 27087,
             docs_num_per_request = 500000,
-            synchronize_query_size = 5000,
-            synchronize_worker = 6,
+            synchronize_query_size = 50000,
+            synchronize_worker = -1,
             synchronize_timeout = -1,
             gridfs = False):
 
@@ -784,8 +784,6 @@ class HyperspectralDatabase(Database):
             index = doc['insert_index']
             indices.append(int(index))
 
-        original_gridfs_mode, original_sync_worker = self.gridfs, self.synchronize_worker
-        self.gridfs, self.synchronize_worker = False, -1
         splits = len(docs_without_spectral) // self.docs_num_per_request
         if (len(docs_without_spectral) % self.docs_num_per_request) != 0:
             splits += 1
@@ -806,7 +804,6 @@ class HyperspectralDatabase(Database):
 
             data += split_data
 
-        self.gridfs, self.synchronize_worker = original_gridfs_mode, original_sync_worker
         if hint:
             print('Acquiring {0} data in the {1}.'.format(len(data),
                     self.__class__.__name__))
