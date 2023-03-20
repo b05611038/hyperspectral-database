@@ -727,6 +727,7 @@ class HyperspectralDatabase(Database):
             if ('insert_index' not in data_args) and ('spectral' in data_args):
                 data_args = tuple(list(data_args) + ['insert_index'])
 
+        counting = 0
         tmp_cursor = self.find(queries, collection = data_collection)
         for doc in tmp_cursor:
             single_data = {}
@@ -735,6 +736,11 @@ class HyperspectralDatabase(Database):
                 single_data[args] = args_value
 
             data.append(single_data)
+            counting += 1
+
+        if counting > self.docs_num_per_request:
+            raise RuntimeError('Too data to grab from {0} in the same time.' + \
+                    ' Please properly split your conditions.')
 
         if 'spectral' in data_args:
             if self.gridfs:
@@ -807,22 +813,41 @@ class HyperspectralDatabase(Database):
 
         return data
         
+    def _properly_split_get_data(self, queries, data_collection, spectral_collection, 
+            data_args, hint):
+
+        if isinstance(queries, (list, tuple)):
+            if len(queries) > 1:
+                count_query = {'$or': queries}
+            else:
+                count_query = queries[0]
+
+        elif isinstance(queries, dict):
+            count_query = copy.deepcopy(queries)
+
+        else:
+            raise TypeError('Invalid object type for argument: queries.')
+
+        docs_num = self.count_documents(count_query, collection = data_collection)
+        if docs_num > self.docs_num_per_request:
+            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
+            data = self._efficiently_get_data_by_proper_split(tmp_docs,
+                    data_collection, spectral_collection, data_args, hint)
+        else:
+            data  = self.get_data(queries, data_collection = data_collection,
+                                 spectral_collection = spectral_collection,
+                                 data_args = data_args,
+                                 hint = hint)
+
+        return data
 
     def get_all_data(self, data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral'), hint = True):
 
-        docs_num = self.count_documents({}, collection = data_collection)
-        if docs_num > self.docs_num_per_request:
-            tmp_docs = self._get_docs_only_with_insert_index({}, data_collection)
-            data = self._efficiently_get_data_by_proper_split(tmp_docs,
-                    data_collection, spectral_collection, data_args, hint)
-        else:
-            data = self.get_data({}, data_collection = data_collection,
-                                     spectral_collection = spectral_collection,
-                                     data_args = data_args,
-                                     hint = hint)
-
-        return data
+        return self._properly_split_get_data({}, 
+                data_collection, 
+                spectral_collection, 
+                data_args, hint)
 
     def get_data_by_indices(self, indices, 
             data_collection = 'data', spectral_collection = 'spectral', 
@@ -838,10 +863,10 @@ class HyperspectralDatabase(Database):
        for index in indices:
            queries.append({'insert_index': index})
 
-       return self.get_data(queries, data_collection = data_collection,
-                                 spectral_collection = spectral_collection,
-                                 data_args = data_args,
-                                 hint = hint)
+       return self._properly_split_get_data(queries,
+                data_collection, 
+                spectral_collection, 
+                data_args, hint)
 
     def get_data_by_index_range(self, start, stop = None, step = None,
                 data_collection = 'data', spectral_collection = 'spectral',
@@ -887,23 +912,10 @@ class HyperspectralDatabase(Database):
         for datatype in datatypes:
             queries.append({'datatype': datatype})
 
-        if len(queries) > 1:
-            count_query = {'$or': queries}
-        else:
-            count_query = queries[0]
-
-        docs_num = self.count_documents(count_query, collection = data_collection)
-        if docs_num > self.docs_num_per_request:
-            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
-            data = self._efficiently_get_data_by_proper_split(tmp_docs, 
-                    data_collection, spectral_collection, data_args, hint)
-        else:
-            data  = self.get_data(queries, data_collection = data_collection,
-                                 spectral_collection = spectral_collection,
-                                 data_args = data_args,
-                                 hint = hint)
-
-        return data
+        return self._properly_split_get_data(queries,
+                 data_collection,
+                 spectral_collection,
+                 data_args, hint)
 
     def get_data_by_species(self, species, 
             data_collection = 'data', spectral_collection = 'spectral',
@@ -923,23 +935,10 @@ class HyperspectralDatabase(Database):
         for s in species:
             queries.append({'species': s})
 
-        if len(queries) > 1:
-            count_query = {'$or': queries}
-        else:
-            count_query = queries[0]
-
-        docs_num = self.count_documents(count_query, collection = data_collection)
-        if docs_num > self.docs_num_per_request:
-            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
-            data = self._efficiently_get_data_by_proper_split(tmp_docs, 
-                    data_collection, spectral_collection, data_args, hint)
-        else:
-            data  = self.get_data(queries, data_collection = data_collection,
-                                 spectral_collection = spectral_collection,
-                                 data_args = data_args,
-                                 hint = hint)
-
-        return data
+        return self._properly_split_get_data(queries,
+                 data_collection,
+                 spectral_collection,
+                 data_args, hint)
 
     def get_indices(self, queries, collection = 'data'):
         if not isinstance(queries, (dict, list, tuple)):
