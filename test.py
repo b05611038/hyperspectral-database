@@ -3,7 +3,6 @@ import argparse
 
 from hyperspectral_database import HyperspectralDatabase
 
-
 def get_data_api_tesing(db):
     data = db.get_data_by_indices([0])
     data = db.get_data_by_index_range(1)
@@ -95,9 +94,11 @@ def main():
             help = 'The host of the deployed MongoDB.')
     parser.add_argument('--port', type = int, default = 27087,
             help = 'The port of the deployed MongoDB.')
-    parser.add_argument('--query_size', type = int, default = 10000,
+    parser.add_argument('--docs_num_per_request', type = int, default = 500000,
+            help = 'The argument can prevent program from transport to large file error.')
+    parser.add_argument('--synchronize_query_size', type = int, default = 5000,
             help = 'The partition size of the sycn_wrapper.')
-    parser.add_argument('--synchronize_worker', type = int, default = 4,
+    parser.add_argument('--synchronize_worker', type = int, default = 6,
             help = 'The process number of the multiprocessing.')
     parser.add_argument('--from_list_collection', action = 'store_true',
             help = 'Grab the data from list collection.')
@@ -119,7 +120,8 @@ def main():
                                passwd = args.passwd,
                                host = args.host,
                                port = args.port,
-                               query_size = args.query_size,
+                               docs_num_per_request = args.docs_num_per_request,
+                               synchronize_query_size = args.synchronize_query_size,
                                synchronize_worker = args.synchronize_worker,
                                gridfs = gridfs)
 

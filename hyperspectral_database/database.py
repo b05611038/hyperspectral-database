@@ -28,11 +28,10 @@ class HyperspectralDatabase(Database):
             passwd = '',
             host = '192.168.50.146',
             port = 27087,
-            query_size = 1000,
-            docs_num_per_request = 100000,
-            synchronize_worker = -1,
+            docs_num_per_request = 500000,
+            synchronize_query_size = 5000,
+            synchronize_worker = 6,
             synchronize_timeout = -1,
-            memory_efficent_mode = True,
             gridfs = False):
 
         super(HyperspectralDatabase, self).__init__(
@@ -47,17 +46,16 @@ class HyperspectralDatabase(Database):
         self.fs, self.collections = self._init_gridfs_collections(self.database,
                                                                   self._collection_list)
 
-        self.query_size = query_size
-        self.memory_efficent_mode = memory_efficent_mode # work when gridfs=False
         self.docs_num_per_request = docs_num_per_request
         self.gridfs = gridfs
 
+        self.sync_wrapper = SynchronizedFunctionWapper(self, 
+                query_size = synchronize_query_size,
+                timeout = synchronize_timeout)
+
+        self.synchronize_query_size = synchronize_query_size
         self.synchronize_worker = synchronize_worker
         self.synchronize_timeout = synchronize_timeout
-        self.sync_wrapper = SynchronizedFunctionWapper(self, 
-                query_size = query_size,
-                num_worker = synchronize_worker,
-                timeout = synchronize_timeout)
 
     def _init_gridfs_collections(self, database, name_list):
         fs = gridfs.GridFS(database)
@@ -85,36 +83,6 @@ class HyperspectralDatabase(Database):
         return None
 
     @property
-    def query_size(self):
-        return self._query_size
-
-    @query_size.setter
-    def query_size(self, query_size):
-        if not isinstance(query_size, int):
-            raise TypeError('Argument: query_size must be a Python int object.')
-
-        if query_size <= 0:
-            raise ValueError('Argument: query_size must at least be one.')
-
-        self._query_size = query_size
-        if self.sync_wrapper is not None:
-            self.sync_wrapper.query_size = query_size
-
-        return None
-
-    @property
-    def memory_efficent_mode(self):
-        return self._memory_efficent_mode
-
-    @memory_efficent_mode.setter
-    def memory_efficent_mode(self, memory_efficent_mode):
-        if not isinstance(memory_efficent_mode, bool):
-            raise TypeError('Argument: memory_efficent_mode must be a Python boolean object.')
-
-        self._memory_efficent_mode = memory_efficent_mode
-        return None
-
-    @property
     def docs_num_per_request(self):
         return self._docs_num_per_request
 
@@ -130,6 +98,24 @@ class HyperspectralDatabase(Database):
         return None
 
     @property
+    def synchronize_query_size(self):
+        return self._synchronize_query_size
+
+    @synchronize_query_size.setter
+    def synchronize_query_size(self, synchronize_query_size):
+        if not isinstance(synchronize_query_size, int):
+            raise TypeError('Argument: synchronize_query_size must be a Python int object.')
+
+        if synchronize_query_size <= 0:
+            raise ValueError('Argument: synchronize_query_size must at least be one.')
+
+        self._synchronize_query_size = synchronize_query_size
+        if self.sync_wrapper is not None:
+            self.sync_wrapper.query_size = synchronize_query_size
+
+        return None
+
+    @property
     def synchronize_worker(self):
         return self._synchronize_worker
 
@@ -142,6 +128,7 @@ class HyperspectralDatabase(Database):
             if synchronize_worker < 0:
                 raise ValueError('Argument: synchronize_worker must larger than zero.') 
 
+        synchronize_worker = int(synchronize_worker)
         self._synchronize_worker = synchronize_worker
         if self.sync_wrapper is not None:
             self.sync_wrapper.num_worker = synchronize_worker
@@ -172,8 +159,7 @@ class HyperspectralDatabase(Database):
     def __repr__(self):
         lines = 'HyperspectralDatabase version: {0}\n'.format(__version__)
         lines += '  User: {0}\n  Host: {1}\n  Port: {2}\n'.format(self.user, self.host, self.port)
-        lines += '  Gridfs mode: {0}\n  Memory efficient mode: {1}\n'\
-                .format(self.gridfs, self.memory_efficent_mode)
+        lines += '  Gridfs mode: {0}\n'.format(self.gridfs)
         lines += '  Database: {0}\n    Collections:\n'.format(self.db)
         for col in self._collection_list:
             lines += '      {0}\n'.format(col)
@@ -737,11 +723,9 @@ class HyperspectralDatabase(Database):
 
         data = []
         if not self.gridfs:
-            if 'insert_index' not in data_args:
-                original_data_args = copy.deepcopy(data_args)
-                data_args = list(data_args) + ['insert_index']
-            else:
-                original_data_args = None
+            original_data_args = copy.deepcopy(data_args)
+            if ('insert_index' not in data_args) and ('spectral' in data_args):
+                data_args = tuple(list(data_args) + ['insert_index'])
 
         tmp_cursor = self.find(queries, collection = data_collection)
         for doc in tmp_cursor:
@@ -758,15 +742,11 @@ class HyperspectralDatabase(Database):
                                          sync_args = ('docs', ),
                                          docs = data)
             else:
-                if self.memory_efficent_mode:
-                    data = self.sync_wrapper(get_spectral_list,
-                                             sync_args = ('docs', ),
-                                             docs = data,
-                                             original_data_args = original_data_args,
-                                             spectral_collection = spectral_collection)
-                else:
-                    raise NotImplementedError('Please contact developer.')
-
+                data = self.sync_wrapper(get_spectral_list,
+                                         sync_args = ('docs', ),
+                                         docs = data,
+                                         original_data_args = original_data_args,
+                                         spectral_collection = spectral_collection)
         if hint:
             print('Acquiring {0} data in the {1}.'.format(len(data), 
                     self.__class__.__name__))

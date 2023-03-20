@@ -210,9 +210,8 @@ class _OrderAllocator:
                 raise TypeError('Argument: queries must be a Python list/tuple object.')
 
             partitions = len(args) // self.size
-            if partitions > 0:
-                if len(args) % partitions > 0:
-                    partitions += 1
+            if len(args) % self.size > 0:
+                partitions += 1
 
             for order in range(partitions):
                 if order == partitions - 1:
@@ -228,7 +227,7 @@ class _OrderAllocator:
 
 
 class SynchronizedFunctionWapper:
-    def __init__(self, database, query_size, num_worker = 2, 
+    def __init__(self, database, query_size, num_worker = 6, 
             process_check_interval = 0.1, timeout = -1):
 
         if not isinstance(database, Database):
@@ -249,17 +248,16 @@ class SynchronizedFunctionWapper:
 
         self.allocator = _OrderAllocator(query_size)
 
-        if num_worker > 1:
-            if platform.system() == 'Darwin' or platform.system() == 'Windows':
-                self.mp_start_method = 'spawn'
-            elif platform.system() == 'Linux':
-                self.mp_start_method = 'fork'
-            else:
-                self.mp_start_method = None
-                print('Not support multiprocessing, the get_data functions will' + \
-                        ' run in single process.')
+        if platform.system() == 'Darwin' or platform.system() == 'Windows':
+            self.mp_start_method = 'spawn'
+        elif platform.system() == 'Linux':
+            self.mp_start_method = 'fork'
         else:
-             self.mp_start_method = None
+            self.mp_start_method = None
+            print('Not support multiprocessing, the get_data functions will' + \
+                    ' run in single process.')
+
+        self.mp_start_method = None
 
         if self.mp_start_method is not None:
             mp.set_start_method(self.mp_start_method, force = True)
@@ -279,7 +277,7 @@ class SynchronizedFunctionWapper:
             if num_worker < 0:
                 raise ValueError('Argument: num_worker must at least be one.')
 
-        self._num_worker = num_worker
+        self._num_worker = int(num_worker)
         return None
 
     @property
@@ -294,7 +292,7 @@ class SynchronizedFunctionWapper:
         if process_check_interval < 0:
             raise ValueError('Argument: process_check_interval must be larger than zero.')
 
-        self._process_check_interval = process_check_interval
+        self._process_check_interval = float(process_check_interval)
         return None
 
     @property
@@ -324,6 +322,24 @@ class SynchronizedFunctionWapper:
             available = True
 
         return available
+
+    def can_exec_with_multiprocess(self, partitions = None):
+        exec_with_multiprocess = False
+        if partitions is not None:
+            if not isinstance(partitions, int):
+                raise TypeError('Argument: partitions must be a Python int object.')
+
+            if partitions < 1:
+                raise ValueError('Partition cannot smallert one.')
+
+        if self.num_worker > 1:
+            if partitions is None:
+                exec_with_multiprocess = copy.deepcopy(self.available)
+            else:
+                if partitions > 1:
+                    exec_with_multiprocess = True
+
+        return exec_with_multiprocess
 
     def __repr__(self):
         if self.timeout < 0:
@@ -374,80 +390,77 @@ class SynchronizedFunctionWapper:
 
             timeout = float(timeout)
 
-        if self.available:
-            with mp.Manager() as manager:
-                inputs_container = manager.dict()
-                shared_arguments = manager.dict()
-                if sync_args is not None:
-                    for args in sync_args:
-                        inputs_container = self.allocator(kwargs.get(args, None), 
-                                args_name = args,
-                                args_container = inputs_container)
+        with mp.Manager() as manager:
+            inputs_container = manager.dict()
+            shared_arguments = manager.dict()
+            if sync_args is not None:
+                for args in sync_args:
+                    inputs_container = self.allocator(kwargs.get(args, None), 
+                            args_name = args,
+                            args_container = inputs_container)
 
-                for argument in kwargs:
-                    if argument in self.forbidden_keywords:
-                        raise RuntimeError('Argument cannot be named as {0}.'.format(argument))
+            for argument in kwargs:
+                if argument in self.forbidden_keywords:
+                    raise RuntimeError('Argument cannot be named as {0}.'.format(argument))
 
-                    if argument not in sync_args:
-                        shared_arguments[argument] = kwargs[argument]
+                if argument not in sync_args:
+                    shared_arguments[argument] = kwargs[argument]
 
-                recorded_partition_number = 1
-                for args in inputs_container:
-                    partition_number_of_args = len(inputs_container[args])
-                    if partition_number_of_args != 1:
-                        if recorded_partition_number == 1:
-                            recorded_partition_number = partition_number_of_args
-                        else:
-                            if partition_number_of_args != recorded_partition_number:
-                                raise RuntimeError('Cannot split argument: {0} correctly'\
-                                        .format(args))
+            recorded_partition_number = 1
+            for args in inputs_container:
+                partition_number_of_args = len(inputs_container[args])
+                if partition_number_of_args != 1:
+                    if recorded_partition_number == 1:
+                        recorded_partition_number = partition_number_of_args
+                    else:
+                        if partition_number_of_args != recorded_partition_number:
+                            raise RuntimeError('Cannot split argument: {0} correctly'\
+                                    .format(args))
 
-                if recorded_partition_number > 1:
-                    order_generator = _ExecuteGenerator(recorded_partition_number)
-                    shared_arguments['database'] = self.database.lightweighted_arguments()
+            if self.can_exec_with_multiprocess(partitions = recorded_partition_number):
+                order_generator = _ExecuteGenerator(recorded_partition_number)
+                shared_arguments['database'] = self.database.lightweighted_arguments()
 
-                    queue_outputs = manager.Queue()
-                    queue_task_generator = manager.Queue()
-                    queue_task_generator.put(order_generator)
+                queue_outputs = manager.Queue()
+                queue_task_generator = manager.Queue()
+                queue_task_generator.put(order_generator)
 
-                    outputs = []
-                    running_processes, process_lock = [], Lock()
-                    complete_warning, start_time = False, time.time()
-                    for rank in range(self.num_worker):
-                        func_args = list(kwargs.keys())
-                        p = Process(target = run_worker,
-                                args = (rank,
-                                        process_lock,
-                                        inputs_container,
-                                        shared_arguments,
-                                        queue_outputs,
-                                        queue_task_generator,
-                                        func,
-                                        func_args))
+                outputs = []
+                running_processes, process_lock = [], Lock()
+                complete_warning, start_time = False, time.time()
+                for rank in range(self.num_worker):
+                    func_args = list(kwargs.keys())
+                    p = Process(target = run_worker,
+                            args = (rank,
+                                    process_lock,
+                                    inputs_container,
+                                    shared_arguments,
+                                    queue_outputs,
+                                    queue_task_generator,
+                                    func,
+                                    func_args))
 
-                        p.start()
-                        running_processes.append(p)
+                    p.start()
+                    running_processes.append(p)
 
-                    finish = False
-                    while (not finish):
-                        outputs = self.merge_process_outputs(outputs, queue_outputs)
-                        if self.check_subprocess_finish(running_processes):
+                finish = False
+                while (not finish):
+                    outputs = self.merge_process_outputs(outputs, queue_outputs)
+                    if self.check_subprocess_finish(running_processes):
+                        finish = True
+
+                    time.sleep(self.process_check_interval)
+                    if timeout is not None:
+                        if (time.time() - start_time) > timeout:
+                            print('Reach timeout limit, force stop function wrapper.')
+                            complete_warning = True
+                            self.terminate_process(running_processes)
                             finish = True
 
-                        time.sleep(self.process_check_interval)
-                        if timeout is not None:
-                            if (time.time() - start_time) > timeout:
-                                print('Reach timeout limit, force stop function wrapper.')
-                                complete_warning = True
-                                self.terminate_process(running_processes)
-                                finish = True
-
-                    outputs = self.merge_process_outputs(outputs, queue_outputs)
-                    manager.shutdown()
-                else:
-                    outputs = func(self.database, **kwargs)
-        else:
-            outputs = func(self.database, **kwargs)
+                outputs = self.merge_process_outputs(outputs, queue_outputs)
+                manager.shutdown()
+            else:
+                outputs = func(self.database, **kwargs)
 
         return outputs
 
