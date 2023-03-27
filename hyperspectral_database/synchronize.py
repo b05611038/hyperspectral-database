@@ -13,57 +13,69 @@ __all__ = ['SynchronizedFunctionWapper']
 
 
 def run_worker(rank, 
-        lock, 
         inputs_container, 
         shared_arguments,
         queue_outputs,
-        queue_task_generator,
         func, args, worker_timeout = -1.):
+
+    query_size = shared_arguments.get('query_size', None)
+    if query_size is None:
+        raise RuntimeError('Cannot acquire query_size in sync_wrapper.')
 
     database = shared_arguments.get('database', None)
     sync_database = LightWeightedDatabaseClient(**database)
     if database is None:
         raise RuntimeError('Cannot acquire attribute from HyperspectralDatabase.')
 
-    while True:
-        order_finish, kwargs = False, {}
-        lock_time = time.time()
-        lock.acquire()
-        if queue_task_generator.empty():
-            raise RuntimeError('Cannot detect order_generator object.')
-
-        order_generator = queue_task_generator.get()
-        if not order_generator.finish:
-            order_index = order_generator.next()
+    partitions = None
+    for argument in args:
+        contents = inputs_container.get(argument, None)
+        if contents is None:
+            contents = shared_arguments.get(argument, None)
         else:
-            order_finish = True
+            length_of_contents = len(contents.get(rank, []))
+            tmp_partition = length_of_contents // query_size
+            if length_of_contents % query_size > 0:
+                tmp_partition += 1
 
-        queue_task_generator.put(order_generator)
-        lock.release()
-
-        if order_finish:
-            break
+        if partitions is None:
+            partitions = tmp_partition
         else:
-            kwargs['database'] = sync_database
-            for argument in args:
-                partition_mode = True
-                contents = inputs_container.get(argument, None)
-                if contents is None:
-                    partition_mode = False
-                    contents = shared_arguments.get(argument, None)
+            if tmp_partition != partitions:
+                raise RuntimeError('Error partition assignment in the {0} sub-process'\
+                        .format(rank))
 
-                if contents is None:
+    if partitions is None:
+        raise RuntimeError('Cannot acquire sync argument in the sync_wrapper.')
+
+    break_flag = False
+    for split_index in range(partitions):
+        split_kwargs = {'database': sync_database}
+        start_index = split_index * query_size
+        end_index = (split_index + 1) * query_size
+        if end_index >= length_of_contents:
+            end_index = length_of_contents
+            break_flag = True
+
+        for argument in args:
+            contents = inputs_container.get(argument, None)
+            if contents is None:
+                contents = shared_arguments.get(argument, None)
+            else:
+                contents = contents[rank][start_index: end_index]
+
+            if contents is None:
                     raise RuntimeError('Loss argument in subprocess, ' + \
                             'please ensure all arguemnt is defined.')
 
-                if partition_mode:
-                    contents = contents[order_index]
+            split_kwargs[argument] = contents
 
-                kwargs[argument] = contents
+        outputs = func(**split_kwargs)
+        outputs = _DocumentList(outputs)
+        queue_outputs.put(outputs)
 
-            outputs = func(**kwargs)
-            outputs = _DocumentList(outputs)
-            queue_outputs.put(outputs)
+        if break_flag:
+            break
 
     return None
 
@@ -98,94 +110,30 @@ class _DocumentList:
         return self.__docs[idx]
 
 
-class _ExecuteGenerator:
-    def __init__(self, order_length, debug = False):
-        self.order_length = order_length
-        self.debug = debug
-        self.finish = False
-
-    def __repr__(self):
-        if self.debug:
-            text = self.__class__.__name__ + '(finish={0}, running_index={1})'\
-                    .format(self.finish, self.__running_index)
-        else:
-            text = self.__class__.__name__ + '(finish={0})'.format(self.finish)
-
-        return text
-
-    @property
-    def order_length(self):
-        return self._order_length
-
-    @order_length.setter
-    def order_length(self, order_length):
-        if not isinstance(order_length, int):
-            raise TypeError('Argument: order_length must be a Python int object.')
-
-        if order_length <= 0:
-            raise ValueError('Argument: order_length must at least be one.')
-
-        self._order_length = order_length
-        return None
-
-    @property
-    def debug(self):
-        return self._debug
-
-    @debug.setter
-    def debug(self, debug):
-        if not isinstance(debug, bool):
-            raise TypeError('Argument: debug must be a Python boolean object.')
-
-        self._debug = debug
-        return None
-
-    @property
-    def finish(self):
-        return self.__finish
-
-    @finish.setter
-    def finish(self, finish):
-        if not isinstance(finish, bool):
-            raise TypeError('Argument: finish must be a Python boolean object.')
-
-        if finish:
-            raise RuntimeError('Argument: finish cannot set as True in the initial condition.')
-
-        self.__finish = finish
-        self.__running_index = 0
-        return None
-
-    def next(self):
-        index_now = copy.deepcopy(self.__running_index)
-        self.__running_index += 1
-
-        if self.__running_index == self.order_length:
-            self.__finish = True
-
-        return index_now
-
-
 class _OrderAllocator:
-    def __init__(self, size):
-        self.size = size
+    def __init__(self, num_worker):
+        self.num_worker = num_worker
 
     def __repr__(self):
-        return self.__class__.__name__ + '(size={0})'.format(self.size)
+        return self.__class__.__name__ + '(size={0}, num_worker={1})'\
+                .format(self.size, self.num_worker)
 
     @property
-    def size(self):
-        return self._size
+    def num_worker(self):
+        return self._num_worker
 
-    @size.setter
-    def size(self, size):
-        if not isinstance(size, int):
-            raise TypeError('Argument: size must be a Python int object.')
+    @num_worker.setter
+    def num_worker(self, num_worker):
+        if not isinstance(num_worker, int):
+            raise TypeError('Argument: num_worker must be a Python int object.')
 
-        if size <= 0:
-            raise ValueError('Argument: size must at least be one.')
+        if num_worker == -1:
+            pass
+        else:
+            if num_worker < 0:
+                raise ValueError('Argument: num_worker must at least be one.')
 
-        self._size = size
+        self._num_worker = num_worker
         return None
 
     def __call__(self, args, args_name = None, args_container = None):
@@ -204,30 +152,38 @@ class _OrderAllocator:
             if not isinstance(args_name, str):
                 raise TypeError('Argument: args_name must be a Python string object.')
 
-        if args is not None:
-            contents = {}
-            if not isinstance(args, (tuple, list)):
-                raise TypeError('Argument: queries must be a Python list/tuple object.')
+        if self.num_worker > 1:
+            if args is not None:
+                contents = {}
+                if not isinstance(args, (tuple, list)):
+                    raise TypeError('Argument: queries must be a Python list/tuple object.')
 
-            partitions = len(args) // self.size
-            if len(args) % self.size > 0:
-                partitions += 1
+                break_flag = False
+                order_length = (len(args) // self.num_worker) + 1
+                for order in range(self.num_worker):
+                    start_index = order * order_length
+                    end_index = (order + 1) * order_length
+                    if end_index >= len(args):
+                        end_index = len(args)
+                        break_flag = True
 
-            for order in range(partitions):
-                if order == partitions - 1:
-                    content = args[order * self.size: ]
-                else:
-                    content = args[order * self.size: (order + 1) * self.size]
+                    contents[order] = args[start_index: end_index]
+                    if break_flag:
+                        break
 
-                contents[order] = content
+                if end_index != len(args):
+                    raise RuntimeError('{0} have some problem on allocate mission, please contact developer.'\
+                            .format(self.__class__.__name__))
 
-            args_container[args_name] = contents
+                args_container[args_name] = contents
+        else:
+            args_container[args_name] = args
 
         return args_container
 
 
 class SynchronizedFunctionWapper:
-    def __init__(self, database, query_size, num_worker = 6, 
+    def __init__(self, database, query_size, num_worker = 8, 
             process_check_interval = 0.1, timeout = -1):
 
         if not isinstance(database, Database):
@@ -239,14 +195,14 @@ class SynchronizedFunctionWapper:
         if query_size <= 0:
             raise ValueError('Argument: query_size must at least be one.')
 
+        self.allocator = _OrderAllocator(num_worker)
+
         self.database = database
         self.query_size = query_size
         self.num_worker = num_worker
         self.process_check_interval = process_check_interval
         self.timeout = timeout
-        self.forbidden_keywords = ('order_generator', 'generator_lock', 'database')
-
-        self.allocator = _OrderAllocator(query_size)
+        self.forbidden_keywords = ('database', )
 
         if platform.system() == 'Darwin' or platform.system() == 'Windows':
             self.mp_start_method = 'spawn'
@@ -256,8 +212,6 @@ class SynchronizedFunctionWapper:
             self.mp_start_method = None
             print('Not support multiprocessing, the get_data functions will' + \
                     ' run in single process.')
-
-        self.mp_start_method = None
 
         if self.mp_start_method is not None:
             mp.set_start_method(self.mp_start_method, force = True)
@@ -272,12 +226,23 @@ class SynchronizedFunctionWapper:
             raise TypeError('Argument: num_worker must be a Python int object.')
 
         if num_worker == -1:
-            print('Sychronized wrapper not execute. All use single process.')
+            print('Forbidden sync_wrapper. HyperspectralDatabase was operated' + \
+                    ' in single process mode (recommended).')
         else:
             if num_worker < 0:
                 raise ValueError('Argument: num_worker must at least be one.')
 
-        self._num_worker = int(num_worker)
+            if num_worker > 1:
+                print('Synchronize ({0}-process) get_data available. This mode'.format(num_worker) + \
+                        ' was not recommended in most of conditions.')
+            else:
+                print('Forbidden sync_wrapper. HyperspectralDatabase was operated' + \
+                        ' in single process mode (recommended).')
+
+        self._num_worker = num_worker
+        if self.allocator is not None:
+            self.allocator.num_worker = num_worker
+
         return None
 
     @property
@@ -323,21 +288,10 @@ class SynchronizedFunctionWapper:
 
         return available
 
-    def can_exec_with_multiprocess(self, partitions = None):
+    def can_exec_with_multiprocess(self):
         exec_with_multiprocess = False
-        if partitions is not None:
-            if not isinstance(partitions, int):
-                raise TypeError('Argument: partitions must be a Python int object.')
-
-            if partitions < 1:
-                raise ValueError('Partition cannot smallert one.')
-
         if self.num_worker > 1:
-            if partitions is None:
-                exec_with_multiprocess = copy.deepcopy(self.available)
-            else:
-                if partitions > 1:
-                    exec_with_multiprocess = True
+            exec_with_multiprocess = self.available
 
         return exec_with_multiprocess
 
@@ -406,37 +360,21 @@ class SynchronizedFunctionWapper:
                 if argument not in sync_args:
                     shared_arguments[argument] = kwargs[argument]
 
-            recorded_partition_number = 1
-            for args in inputs_container:
-                partition_number_of_args = len(inputs_container[args])
-                if partition_number_of_args != 1:
-                    if recorded_partition_number == 1:
-                        recorded_partition_number = partition_number_of_args
-                    else:
-                        if partition_number_of_args != recorded_partition_number:
-                            raise RuntimeError('Cannot split argument: {0} correctly'\
-                                    .format(args))
-
-            if self.can_exec_with_multiprocess(partitions = recorded_partition_number):
-                order_generator = _ExecuteGenerator(recorded_partition_number)
+            if self.can_exec_with_multiprocess():
                 shared_arguments['database'] = self.database.lightweighted_arguments()
+                shared_arguments['query_size'] = self.query_size
 
                 queue_outputs = manager.Queue()
-                queue_task_generator = manager.Queue()
-                queue_task_generator.put(order_generator)
 
-                outputs = []
-                running_processes, process_lock = [], Lock()
+                outputs, running_processes = [], []
                 complete_warning, start_time = False, time.time()
                 for rank in range(self.num_worker):
                     func_args = list(kwargs.keys())
                     p = Process(target = run_worker,
                             args = (rank,
-                                    process_lock,
                                     inputs_container,
                                     shared_arguments,
                                     queue_outputs,
-                                    queue_task_generator,
                                     func,
                                     func_args))
 

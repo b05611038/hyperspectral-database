@@ -98,7 +98,7 @@ def main():
             help = 'The argument can prevent program from transport to large file error.')
     parser.add_argument('--synchronize_query_size', type = int, default = 5000,
             help = 'The partition size of the sycn_wrapper.')
-    parser.add_argument('--synchronize_worker', type = int, default = 6,
+    parser.add_argument('--synchronize_worker', type = int, default = 8,
             help = 'The process number of the multiprocessing.')
     parser.add_argument('--from_list_collection', action = 'store_true',
             help = 'Grab the data from list collection.')

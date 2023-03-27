@@ -29,7 +29,7 @@ class HyperspectralDatabase(Database):
             host = '192.168.50.146',
             port = 27087,
             docs_num_per_request = 500000,
-            synchronize_query_size = 50000,
+            synchronize_query_size = 100000,
             synchronize_worker = -1,
             synchronize_timeout = -1,
             gridfs = False):
@@ -46,13 +46,12 @@ class HyperspectralDatabase(Database):
         self.fs, self.collections = self._init_gridfs_collections(self.database,
                                                                   self._collection_list)
 
-        self.docs_num_per_request = docs_num_per_request
         self.gridfs = gridfs
-
         self.sync_wrapper = SynchronizedFunctionWapper(self, 
                 query_size = synchronize_query_size,
                 timeout = synchronize_timeout)
 
+        self.docs_num_per_request = docs_num_per_request
         self.synchronize_query_size = synchronize_query_size
         self.synchronize_worker = synchronize_worker
         self.synchronize_timeout = synchronize_timeout
@@ -109,6 +108,9 @@ class HyperspectralDatabase(Database):
         if synchronize_query_size <= 0:
             raise ValueError('Argument: synchronize_query_size must at least be one.')
 
+        if synchronize_query_size > self.docs_num_per_request:
+            raise ValueError('Argument: synchronize_query_size cannot be larger than docs_num_per_request.')
+
         self._synchronize_query_size = synchronize_query_size
         if self.sync_wrapper is not None:
             self.sync_wrapper.query_size = synchronize_query_size
@@ -128,7 +130,6 @@ class HyperspectralDatabase(Database):
             if synchronize_worker < 0:
                 raise ValueError('Argument: synchronize_worker must larger than zero.') 
 
-        synchronize_worker = int(synchronize_worker)
         self._synchronize_worker = synchronize_worker
         if self.sync_wrapper is not None:
             self.sync_wrapper.num_worker = synchronize_worker
@@ -721,30 +722,77 @@ class HyperspectralDatabase(Database):
         if not isinstance(hint, bool):
             raise TypeError('Argument: hint must be a Python boolean object.')
 
+        data = self._functional_get_data(queries, data_collection, 
+                spectral_collection, data_args)
+
+        if hint:
+            print('Acquiring {0} data in the {1}.'.format(len(data), 
+                    self.__class__.__name__))
+
+        return data
+
+    def _functional_get_data(self, queries, data_collection, spectral_collection, data_args):
         data = []
         if not self.gridfs:
             original_data_args = copy.deepcopy(data_args)
             if ('insert_index' not in data_args) and ('spectral' in data_args):
                 data_args = tuple(list(data_args) + ['insert_index'])
 
-        counting = 0
-        tmp_cursor = self.find(queries, collection = data_collection)
-        for doc in tmp_cursor:
-            single_data = {}
-            for args in data_args:
-                args_value = doc.get(args, 'unknown')
-                single_data[args] = args_value
+        counting, split_queries_mode = 0, False
+        if '$or' in queries.keys():
+            query_size = len(queries['$or'])
+        else:
+            query_size = 1
 
-            data.append(single_data)
-            counting += 1
+        if query_size > self.docs_num_per_request:
+            split_queries_mode = True
 
-        if counting > self.docs_num_per_request:
-            raise RuntimeError('Too data to grab from {0} in the same time.' + \
-                    ' Please properly split your conditions.')
+        if split_queries_mode:
+            query_list = queries['$or']
+            splits = query_size // self.docs_num_per_request
+            if query_size % self.docs_num_per_request != 0:
+                splits += 1
+
+            break_flag = False
+            for split_index in range(splits):
+                start_index = split_index * self.docs_num_per_request
+                end_index = (split_index + 1) * self.docs_num_per_request
+                if end_index >= query_size:
+                    end_index = query_size
+                    break_flag = True
+
+                tmp_cursor = self.find({'$or': query_list[start_index: end_index]}, 
+                        collection = data_collection)
+                for doc in tmp_cursor:
+                    single_data = {}
+                    for args in data_args:
+                        args_value = doc.get(args, 'unknown')
+                        single_data[args] = args_value
+
+                    data.append(single_data)
+                    counting += 1
+
+                if break_flag:
+                    break
+        else:
+            tmp_cursor = self.find(queries, collection = data_collection)
+            for doc in tmp_cursor:
+                single_data = {}
+                for args in data_args:
+                    args_value = doc.get(args, 'unknown')
+                    single_data[args] = args_value
+
+                data.append(single_data)
+                counting += 1
+
+        if self.sync_wrapper.num_worker <= 1:
+            if counting > self.docs_num_per_request:
+                raise RuntimeError('Too data to grab from {0} in the same time.' + \
+                        ' Please properly split your conditions.')
 
         if 'spectral' in data_args:
             if self.gridfs:
-                data = self.sync_wrapper(get_spectral_gridfs, 
+                data = self.sync_wrapper(get_spectral_gridfs,
                                          sync_args = ('docs', ),
                                          docs = data)
             else:
@@ -753,23 +801,54 @@ class HyperspectralDatabase(Database):
                                          docs = data,
                                          original_data_args = original_data_args,
                                          spectral_collection = spectral_collection)
-        if hint:
-            print('Acquiring {0} data in the {1}.'.format(len(data), 
-                    self.__class__.__name__))
 
         return data
 
     def _get_docs_only_with_insert_index(self, queries, data_collection):
         docs = []
-        tmp_cursor = self.find(queries, collection = data_collection)
-        for doc in tmp_cursor:
-            single_data = {}
-            insert_index = doc.get('insert_index', None)
-            if insert_index is None:
-                raise RuntimeError('Cannot get insert index in document, please check source code.')
+        if '$or' in queries.keys():
+            list_queries = queries['$or']
+            if len(list_queries) > self.docs_num_per_request:
+                splits = len(list_queries) // self.docs_num_per_request
+                if len(list_queries) % self.docs_num_per_request != 0:
+                    splits += 1
+            else:
+                splits = 1
+        else:
+            splits = 1
 
-            single_data['insert_index'] = insert_index
-            docs.append(single_data)
+        if splits > 1:
+            break_flag = False
+            for split_index in range(splits):
+                start_index = split_index * self.docs_num_per_request
+                end_index = (split_index + 1) * self.docs_num_per_request
+                if end_index >= len(list_queries):
+                    end_index = len(list_queries)
+                    break_flag = True
+
+                tmp_queries = {'$or': list_queries[start_index: end_index]}
+                tmp_cursor = self.find(tmp_queries, collection = data_collection)
+                for doc in tmp_cursor:
+                    single_data = {}
+                    insert_index = doc.get('insert_index', None)
+                    if insert_index is None:
+                        raise RuntimeError('Cannot get insert index in document, please check source code.')
+
+                    single_data['insert_index'] = insert_index
+                    docs.append(single_data)
+
+                if break_flag:
+                    break
+        else:
+            tmp_cursor = self.find(queries, collection = data_collection)
+            for doc in tmp_cursor:
+                single_data = {}
+                insert_index = doc.get('insert_index', None)
+                if insert_index is None:
+                    raise RuntimeError('Cannot get insert index in document, please check source code.')
+
+                single_data['insert_index'] = insert_index
+                docs.append(single_data)
 
         return docs
 
@@ -777,36 +856,45 @@ class HyperspectralDatabase(Database):
             docs_without_spectral, 
             data_collection,
             spectral_collection, 
-            data_args, hint):
+            data_args):
 
-        indices = []
+        queries = []
         for doc in docs_without_spectral:
             index = doc['insert_index']
-            indices.append(int(index))
+            queries.append({'insert_index': int(index)})
 
         splits = len(docs_without_spectral) // self.docs_num_per_request
         if (len(docs_without_spectral) % self.docs_num_per_request) != 0:
             splits += 1
 
-        data = []
-        for i in range(splits):
-            start_index = int(i * self.docs_num_per_request)
-            end_index = int((i + 1) * self.docs_num_per_request)
-            if end_index > len(indices):
-                end_index = len(indices)
+        if self.sync_wrapper.num_worker <= 1:
+            data, break_flag = [], False
+            for i in range(splits):
+                start_index = int(i * self.docs_num_per_request)
+                end_index = int((i + 1) * self.docs_num_per_request)
+                if end_index >= len(queries):
+                    end_index = len(queries)
+                    break_flag = True
 
-            split_indices = indices[start_index: end_index]
-            split_data = self.get_data_by_indices(split_indices, 
-                    data_collection = data_collection,
-                    spectral_collection = spectral_collection,
-                    data_args = data_args,
-                    hint = False)
+                split_queries = queries[start_index: end_index]
+                if len(split_queries) > 1:
+                    split_queries = {'$or': split_queries}
+                else:
+                    split_queries = split_queries[0]
 
-            data += split_data
+                split_data = self._functional_get_data(split_queries, data_collection,
+                    spectral_collection, data_args)
 
-        if hint:
-            print('Acquiring {0} data in the {1}.'.format(len(data),
-                    self.__class__.__name__))
+                data += split_data
+                if break_flag:
+                    break
+        else:
+            if len(queries) > 0:
+                queries = {'$or': queries}
+                data = self._functional_get_data(queries, data_collection,
+                        spectral_collection, data_args)
+            else:
+                data = []
 
         return data
         
@@ -814,27 +902,56 @@ class HyperspectralDatabase(Database):
             data_args, hint):
 
         if isinstance(queries, (list, tuple)):
+            queries_size = len(queries)
             if len(queries) > 1:
-                count_query = {'$or': queries}
+                queries = {'$or': queries}
+            elif len(queries) == 1:
+                queries = queries[0] 
             else:
-                count_query = queries[0]
+                raise RuntimeError('Input queries cannot be a empty list/tuple.')
 
         elif isinstance(queries, dict):
-            count_query = copy.deepcopy(queries)
-
+            if '$or' in queries.keys():
+                queries_size = len(queries['$or'])
+            else:
+                queries_size = 1
         else:
             raise TypeError('Invalid object type for argument: queries.')
 
-        docs_num = self.count_documents(count_query, collection = data_collection)
-        if docs_num > self.docs_num_per_request:
-            tmp_docs = self._get_docs_only_with_insert_index(count_query, data_collection)
-            data = self._efficiently_get_data_by_proper_split(tmp_docs,
-                    data_collection, spectral_collection, data_args, hint)
+        if queries_size > self.docs_num_per_request:
+            docs_num = 0
+            if '$or' in queries.keys():
+                query_list = queries['$or']
+                splits = queries_size // self.docs_num_per_request
+                if (queries_size % self.docs_num_per_request) != 0:
+                    splits += 1
+
+                break_flag = False
+                for split_index in range(splits):
+                    start_index = split_index * self.docs_num_per_request
+                    end_index = (split_index + 1) * self.docs_num_per_request
+                    if end_index >= queries_size:
+                        end_index = queries_size
+                        break_flag = True
+
+                    docs_num += self.count_documents({'$or': query_list[start_index: end_index]},
+                            collection = data_collection)
+            else:
+                raise RuntimeError('Cannot correctly split queries, please contact developer.')
         else:
-            data  = self.get_data(queries, data_collection = data_collection,
-                                 spectral_collection = spectral_collection,
-                                 data_args = data_args,
-                                 hint = hint)
+            docs_num = self.count_documents(queries, collection = data_collection)
+
+        if docs_num > self.docs_num_per_request:
+            tmp_docs = self._get_docs_only_with_insert_index(queries, data_collection)
+            data = self._efficiently_get_data_by_proper_split(tmp_docs,
+                    data_collection, spectral_collection, data_args)
+        else:
+            data = self._functional_get_data(queries, data_collection, 
+                    spectral_collection, data_args)
+
+        if hint:
+            print('Acquiring {0} data in the {1}.'.format(len(data),
+                    self.__class__.__name__))
 
         return data
 
