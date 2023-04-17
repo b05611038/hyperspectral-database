@@ -386,9 +386,6 @@ class HyperspectralDatabase(Database):
 
                     inner_batch_index = 0
                     print('Successfully reset file buffer.')
-
-            if len(requests) > 0:
-                self.collections[data_collection].bulk_write(requests)
         else:
             print('Not certain mode, no insertion in the database.')
 
