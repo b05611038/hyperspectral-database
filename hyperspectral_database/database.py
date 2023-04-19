@@ -230,8 +230,7 @@ class HyperspectralDatabase(Database):
 
     def insert_data(self, file, file_extension = '.json', 
             data_collection = 'data', spectral_collection = 'spectral',
-            data_args = ('datatype', 'species', 'spectral'), gridfs = True, 
-            certain = False):
+            data_args = ('datatype', 'species', 'spectral'), certain = False):
 
         if not isinstance(file, str):
             raise TypeError('Argument: file must be a Python string object.')
@@ -268,15 +267,11 @@ class HyperspectralDatabase(Database):
             if not isinstance(e, str):
                 raise TypeError('Element in argument::data_args must be a Python string object.')
 
-        if not isinstance(gridfs, bool):
-            raise TypeError('Argument: gridfs must be a Python boolean object.')
-
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         data_document, spectral_document = self._single_data_document(file, data_args, 
                 data_collection, spectral_collection,
-                gridfs = gridfs,
                 certain = certain)
 
         if certain:
@@ -294,7 +289,7 @@ class HyperspectralDatabase(Database):
     def batch_insert_data(self, directory, file_extension = '.json', 
             data_collection = 'data', spectral_collection = 'spectral',
             data_args = ('datatype', 'species', 'spectral'), batch_size = 10000, 
-            gridfs = True, certain = False, progress = True):
+            certain = False, progress = True):
 
         if not isinstance(directory, str):
             raise TypeError('Argument: directory must be a Python string object')
@@ -334,9 +329,6 @@ class HyperspectralDatabase(Database):
         if batch_size < 0:
             raise ValueError('Argument: batch_size must larger than zero.')
 
-        if not isinstance(gridfs, bool):
-            raise TypeError('Argument: gridfs must be a Python boolean object.')
-
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
@@ -357,7 +349,6 @@ class HyperspectralDatabase(Database):
                 data_document, spectral_document = self._single_data_document(f, data_args, 
                         data_collection, spectral_collection,
                         insert_index = insert_index,
-                        gridfs = gridfs,
                         certain = certain)
 
                 data_col_requests.append(InsertOne(data_document))
@@ -410,7 +401,7 @@ class HyperspectralDatabase(Database):
 
     def _single_data_document(self, json_file_path, data_args, 
             data_collection, spectral_collection,
-            insert_index = None, gridfs = True, certain = False):
+            insert_index = None, certain = False):
 
         content = {}
         single_data_document = Template(data_collection)
@@ -426,24 +417,22 @@ class HyperspectralDatabase(Database):
             args_value = contents.get(args, None)
             if args_value is not None:
                 if args == 'spectral':
-                    if gridfs:
-                        if certain:
-                            args_value = serialize(np.array(args_value,
-                                    dtype = np.float64))
-                            args_value = self.fs.put(args_value)
-                    else:
-                        args_value = list(np.array(args_value, dtype = np.float64))
-                        single_spectral_document['spectral'] = args_value
+                    if certain:
+                        gridfs_value = serialize(np.array(args_value,
+                                dtype = np.float64))
+                        gridfs_value = self.fs.put(gridfs_value)
+                        single_data_document['spectral'] = gridfs_value
 
-                single_data_document[args] = args_value
+                    spectral_value = list(np.array(args_value, dtype = np.float64))
+                    single_spectral_document['spectral'] = spectral_value
+                else:
+                    single_data_document[args] = args_value
 
         if insert_index is None:
             insert_index = self._get_insert_index()
 
         single_data_document['insert_index'] = insert_index
         single_spectral_document['insert_index'] = insert_index
-        if self.gridfs:
-            single_spectral_document = None
 
         return single_data_document, single_spectral_document
 
