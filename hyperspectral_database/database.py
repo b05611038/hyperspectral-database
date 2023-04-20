@@ -377,6 +377,17 @@ class HyperspectralDatabase(Database):
 
                     inner_batch_index = 0
                     print('Successfully reset file buffer.')
+ 
+            if len(spectral_col_requests) > 0:
+                self.collections[spectral_collection].bulk_write(spectral_col_requests)
+                spectral_col_requests = []
+
+            if len(data_col_requests) > 0:
+                self.collections[data_collection].bulk_write(data_col_requests)
+                print('Sucessfully insert {0} files into {1}'\
+                        .format(len(data_col_requests), self.__class__.__name__))
+
+                data_col_requests = []
         else:
             print('Not certain mode, no insertion in the database.')
 
@@ -566,7 +577,7 @@ class HyperspectralDatabase(Database):
         return None 
 
     def delete_data(self, indices, data_collection = 'data', spectral_collection = 'spectral',
-            batch_size = 500000, certain = False):
+            batch_size = 10000, certain = False):
 
         if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
@@ -647,7 +658,7 @@ class HyperspectralDatabase(Database):
         return None
 
     def delete_all(self, data_collection = 'data', spectral_collection = 'spectral',
-            batch_size = 500000, certain = False):
+            batch_size = 10000, certain = False):
 
         if not isinstance(data_collection, str):
             raise TypeError('Argument: data_collection must be a Python string object.')
