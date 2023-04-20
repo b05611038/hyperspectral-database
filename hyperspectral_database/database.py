@@ -8,7 +8,7 @@ import numpy as np
 import gridfs
 from pymongo import (UpdateOne,
                      InsertOne, 
-                     DeleteOne)
+                     DeleteMany)
 
 from . import __version__
 from .base import Database
@@ -577,7 +577,7 @@ class HyperspectralDatabase(Database):
         return None 
 
     def delete_data(self, indices, data_collection = 'data', spectral_collection = 'spectral',
-            batch_size = 10000, certain = False):
+            batch_size = 10000, display_interval = 100, gridfs_progress = True, certain = False):
 
         if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
@@ -608,6 +608,15 @@ class HyperspectralDatabase(Database):
             raise ValueError('Argument: batch_size must in [0, {0}].'\
                     .format(self.docs_num_per_request))
 
+        if not isinstance(display_interval, int):
+            raise TypeError('Argument: display_interval must be a Python int object.')
+
+        if display_interval < 1:
+            raise ValueError('Argument: display_interval cannot be smaller than one.')
+
+        if not isinstance(gridfs_progress, bool):
+            raise TypeError('Argument: gridfs_progress must be a Python boolean object.')
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
@@ -625,7 +634,7 @@ class HyperspectralDatabase(Database):
                 split_indices = indices[start_index: end_index]
                 data_requests, spectral_requests, need_to_delete_pointers = [], [], []
                 if len(split_indices) > 1:
-                    query = {'$or': [{'insert_index': index} for index in split_indices]}
+                    query = {'insert_index': {'$in': [i for i in split_indices]}}
                 elif len(split_indices) == 1:
                     query = {'insert_index': split_indices[0]}
                 else:
@@ -635,21 +644,29 @@ class HyperspectralDatabase(Database):
                     data_docs = self.find(query, collection = data_collection) 
                     for doc in data_docs:
                         object_pointer = doc.get('spectral', 'unknown')
-                        doc_index = doc.get('insert_index', 'unknown')
-
                         need_to_delete_pointers.append(object_pointer)
-                        data_requests.append(DeleteOne({'insert_index': doc_index}))
-                        spectral_requests.append(DeleteOne({'insert_index': doc_index}))
+
+                    data_requests.append(DeleteMany(query))
+                    spectral_requests.append(DeleteMany(query))
+
+                if len(need_to_delete_pointers) > 0:
+                    gridfs_count = 0
+                    for pointer in need_to_delete_pointers:
+                        self._delete_gridfs_object(pointer)
+                        gridfs_count += 1
+
+                        if gridfs_progress:
+                            if gridfs_count % display_interval == 0:
+                                print('Gridfs progress: {0} / {1}'.format(gridfs_count, 
+                                    len(need_to_delete_pointers)))
 
                 if len(data_requests) > 0:
                     self.collections[data_collection].bulk_write(data_requests)
-                    for pointer in need_to_delete_pointers:
-                        self._delete_gridfs_object(pointer)
 
                 if len(spectral_requests) > 0:
                     self.collections[spectral_collection].bulk_write(spectral_requests)
 
-                print('Successfully delete {0} data in {1} | Progress: {2} / {3}'\
+                print('Successfully delete {0} data in {1} | Split progress: {2} / {3}'\
                         .format(len(split_indices), self.__class__.__name__, 
                         split_index + 1, splits))
         else:
@@ -658,7 +675,7 @@ class HyperspectralDatabase(Database):
         return None
 
     def delete_all(self, data_collection = 'data', spectral_collection = 'spectral',
-            batch_size = 10000, certain = False):
+            batch_size = 10000, display_interval = 100, gridfs_progress = True, certain = False):
 
         if not isinstance(data_collection, str):
             raise TypeError('Argument: data_collection must be a Python string object.')
@@ -676,13 +693,6 @@ class HyperspectralDatabase(Database):
 
         spectral_collection = spectral_collection.lower()
 
-        if not isinstance(batch_size, int):
-            raise TypeError('Argument: batch_size must be a Python int object.')
-
-        if batch_size < 0 or batch_size > self.docs_num_per_request :
-            raise ValueError('Argument: batch_size must in [0, {0}].'\
-                    .format(self.docs_num_per_request))
-
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
@@ -692,28 +702,9 @@ class HyperspectralDatabase(Database):
                              data_collection = data_collection,
                              spectral_collection = spectral_collection,
                              batch_size = batch_size,
+                             display_interval = display_interval,
+                             gridfs_progress = gridfs_progress,
                              certain = certain)
-            # data_requests, spectral_requests, need_to_delete_pointers = [], [], []
-            # documents = self.find({}, collection = data_collection)
-            # for doc in documents:
-            #     object_id = doc.get('_id', None)
-            #     data_pointer = doc.get('spectral', 'unknown')
-            #     if object_id is not None:
-            #         data_requests.append(DeleteOne({'_id': object_id}))
-            #         need_to_delete_pointers.append(data_pointer)
-
-            # documents = self.find({}, collection = spectral_collection)
-            # for doc in documents:
-            #     object_id = doc.get('_id', None)
-            #     spectral_requests.append(DeleteOne({'_id': object_id}))
-
-            # if len(data_requests) > 1:
-            #     self.collections[data_collection].bulk_write(data_requests)
-            #     for pointer in need_to_delete_pointers:
-            #         self._delete_gridfs_object(pointer)
-
-            # if len(spectral_requests) > 1:
-            #     self.collections[spectral_collection].bulk_write(spectral_requests)
 
             print('Successfully clear all data in {0}'.format(self.__class__.__name__))
         else:
