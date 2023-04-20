@@ -566,7 +566,7 @@ class HyperspectralDatabase(Database):
         return None 
 
     def delete_data(self, indices, data_collection = 'data', spectral_collection = 'spectral',
-            certain = False):
+            batch_size = 500000, certain = False):
 
         if not isinstance(indices, (int, list, tuple)):
             raise TypeError('Argument: indices must be a Python list/tuple object')
@@ -590,36 +590,64 @@ class HyperspectralDatabase(Database):
 
         spectral_collection = spectral_collection.lower()
 
+        if not isinstance(batch_size, int):
+            raise TypeError('Argument: batch_size must be a Python int object.')
+
+        if batch_size < 0 or batch_size > self.docs_num_per_request :
+            raise ValueError('Argument: batch_size must in [0, {0}].'\
+                    .format(self.docs_num_per_request))
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            data_requests, spectral_requests, need_to_delete_pointers = [], [], []
-            for index in indices:
-                data_docs = self.find({'insert_index': index}, collection = data_collection)
-                for doc in data_docs:
-                    object_pointer = doc.get('spectral', 'unknown')
+            splits = len(indices) // batch_size
+            if len(indices) % batch_size != 0:
+                splits += 1
 
-                need_to_delete_pointers.append(object_pointer)
-                data_requests.append(DeleteOne({'insert_index': index}))
-                spectral_requests.append(DeleteOne({'insert_index': index}))
+            for split_index in range(splits):
+                start_index = split_index * batch_size
+                end_index = (split_index + 1) * batch_size
+                if end_index > len(indices):
+                    end_index = len(indices)
 
-            if len(data_requests) > 0:
-                self.collections[data_collection].bulk_write(data_requests)
-                for pointer in need_to_delete_pointers:
-                    self._delete_gridfs_object(pointer)
+                split_indices = indices[start_index: end_index]
+                data_requests, spectral_requests, need_to_delete_pointers = [], [], []
+                if len(split_indices) > 1:
+                    query = {'$or': [{'insert_index': index} for index in split_indices]}
+                elif len(split_indices) == 1:
+                    query = {'insert_index': split_indices[0]}
+                else:
+                    query = None
 
-            if len(spectral_requests) > 0:
-                self.collections[spectral_collection].bulk_write(spectral_requests)
+                if query is not None:
+                    data_docs = self.find(query, collection = data_collection) 
+                    for doc in data_docs:
+                        object_pointer = doc.get('spectral', 'unknown')
+                        doc_index = doc.get('insert_index', 'unknown')
 
-            print('Successfully delete data with indices:{0}'.format(indices))
+                        need_to_delete_pointers.append(object_pointer)
+                        data_requests.append(DeleteOne({'insert_index': doc_index}))
+                        spectral_requests.append(DeleteOne({'insert_index': doc_index}))
+
+                if len(data_requests) > 0:
+                    self.collections[data_collection].bulk_write(data_requests)
+                    for pointer in need_to_delete_pointers:
+                        self._delete_gridfs_object(pointer)
+
+                if len(spectral_requests) > 0:
+                    self.collections[spectral_collection].bulk_write(spectral_requests)
+
+                print('Successfully delete {0} data in {1} | Progress: {2} / {3}'\
+                        .format(len(split_indices), self.__class__.__name__, 
+                        split_index + 1, splits))
         else:
             print('Not certain mode, no deletion in the database.')
 
         return None
 
     def delete_all(self, data_collection = 'data', spectral_collection = 'spectral',
-            certain = False):
+            batch_size = 500000, certain = False):
 
         if not isinstance(data_collection, str):
             raise TypeError('Argument: data_collection must be a Python string object.')
@@ -637,31 +665,44 @@ class HyperspectralDatabase(Database):
 
         spectral_collection = spectral_collection.lower()
 
+        if not isinstance(batch_size, int):
+            raise TypeError('Argument: batch_size must be a Python int object.')
+
+        if batch_size < 0 or batch_size > self.docs_num_per_request :
+            raise ValueError('Argument: batch_size must in [0, {0}].'\
+                    .format(self.docs_num_per_request))
+
         if not isinstance(certain, bool):
             raise TypeError('Argument: certain must be a Python boolean object.')
 
         if certain:
-            data_requests, spectral_requests, need_to_delete_pointers = [], [], []
-            documents = self.find({}, collection = data_collection)
-            for doc in documents:
-                object_id = doc.get('_id', None)
-                data_pointer = doc.get('spectral', 'unknown')
-                if object_id is not None:
-                    data_requests.append(DeleteOne({'_id': object_id}))
-                    need_to_delete_pointers.append(data_pointer)
+            all_indices = self.get_all_indices(collection = data_collection)
+            self.delete_data(all_indices, 
+                             data_collection = data_collection,
+                             spectral_collection = spectral_collection,
+                             batch_size = batch_size,
+                             certain = certain)
+            # data_requests, spectral_requests, need_to_delete_pointers = [], [], []
+            # documents = self.find({}, collection = data_collection)
+            # for doc in documents:
+            #     object_id = doc.get('_id', None)
+            #     data_pointer = doc.get('spectral', 'unknown')
+            #     if object_id is not None:
+            #         data_requests.append(DeleteOne({'_id': object_id}))
+            #         need_to_delete_pointers.append(data_pointer)
 
-            documents = self.find({}, collection = spectral_collection)
-            for doc in documents:
-                object_id = doc.get('_id', None)
-                spectral_requests.append(DeleteOne({'_id': object_id}))
+            # documents = self.find({}, collection = spectral_collection)
+            # for doc in documents:
+            #     object_id = doc.get('_id', None)
+            #     spectral_requests.append(DeleteOne({'_id': object_id}))
 
-            if len(data_requests) > 1:
-                self.collections[data_collection].bulk_write(data_requests)
-                for pointer in need_to_delete_pointers:
-                    self._delete_gridfs_object(pointer)
+            # if len(data_requests) > 1:
+            #     self.collections[data_collection].bulk_write(data_requests)
+            #     for pointer in need_to_delete_pointers:
+            #         self._delete_gridfs_object(pointer)
 
-            if len(spectral_requests) > 1:
-                self.collections[spectral_collection].bulk_write(spectral_requests)
+            # if len(spectral_requests) > 1:
+            #     self.collections[spectral_collection].bulk_write(spectral_requests)
 
             print('Successfully clear all data in {0}'.format(self.__class__.__name__))
         else:
